@@ -120,6 +120,17 @@ h1{margin:0;text-wrap:balance;font-weight:800;letter-spacing:-.02em;}
 .lift[aria-pressed="true"] .chk{border-color:var(--amber);background:radial-gradient(circle,var(--amber) 0 4px,transparent 4px);}
 
 .setup-card{background:var(--surface);border:1px solid var(--hair-soft);border-radius:var(--r-md);overflow:hidden;}
+.viewnote{
+  display:flex;gap:10px;align-items:flex-start;
+  background:rgba(240,168,40,.07);border:1px solid rgba(240,168,40,.22);
+  border-radius:10px;padding:11px 13px;margin-bottom:14px;
+}
+.viewnote .vk{
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--amber);white-space:nowrap;padding-top:1px;
+}
+.viewnote .vt{font-size:12.5px;line-height:1.5;color:var(--muted);}
+.viewnote .vt b{color:var(--ink);font-weight:600;}
 .setup-diagram{background:var(--ground);border-bottom:1px solid var(--hair-soft);padding:14px;}
 .setup-diagram svg{display:block;width:100%;height:auto;}
 .setup-body{padding:14px 15px;}
@@ -362,8 +373,8 @@ h1{margin:0;text-wrap:balance;font-weight:800;letter-spacing:-.02em;}
             <div class="setup-body" id="setup-body"></div>
           </div>
           <div class="seg" style="margin-top:8px" id="facing-seg">
-            <button data-f="environment" aria-pressed="true">Rear camera</button>
-            <button data-f="user" aria-pressed="false">Front camera</button>
+            <button data-f="user" aria-pressed="true">Front camera</button>
+            <button data-f="environment" aria-pressed="false">Rear camera</button>
           </div>
         </div>
 
@@ -542,17 +553,17 @@ const Calib={
             hip travel.                                               */
 const LIFTS={
   squat:{
-    name:"Back Squat", short:"Squat", view:"Side on",
+    name:"Back Squat", short:"Squat", view:"Head on",
     track:"hip", start:"top", rom0:0.95, anchor:"ank", anchor2:"kne",
     calib:"Stand tall and hold still",
     needs:[KP.lHip,KP.rHip,KP.lKne,KP.rKne,KP.lSho,KP.rSho],
-    setup:"Set the phone <strong>on the floor or a bench, side on</strong>, about 8–10 ft away with the lens near hip height. Your whole body has to stay in frame at the top <em>and</em> in the hole.",
-    setup2:"A 45° angle works too and is easier to fit around a rack. Straight on from the front gives you tempo and range, but not depth.",
+    setup:"Set the phone <strong>on the floor or a bench, facing you head on</strong>, about 8–10 ft away with the lens near hip height. Your whole body has to stay in frame at the top <em>and</em> in the hole.",
+    setup2:"Head on reads depth best: hip and knee are compared against each other vertically and neither is foreshortened. Turn it side on or to 45° when you want torso angle instead — it will say which view it got.",
     measures:[["Depth","Hip crease against the knee at the bottom of every rep"],
-              ["Torso","Whether your hips outrun your chest on the way up"],
+              ["Torso","Whether your hips outrun your chest — needs a side view"],
               ["Tempo","Eccentric, pause and concentric split per rep"],
               ["Fatigue","How much bar speed falls across the set"]],
-    diagram:"side"
+    diagram:"front"
   },
   bench:{
     name:"Bench Press", short:"Bench", view:"Side on",
@@ -568,17 +579,17 @@ const LIFTS={
     diagram:"side"
   },
   sumo:{
-    name:"Sumo Deadlift", short:"Sumo DL", view:"Side on, low",
+    name:"Sumo Deadlift", short:"Sumo DL", view:"Head on, low",
     track:"wrist", start:"bottom", rom0:0.95, anchor:"ank", anchor2:"kne",
     calib:"Hold your setup over the bar",
     needs:[KP.lHip,KP.rHip,KP.lKne,KP.rKne,KP.lSho,KP.rSho,KP.lWri,KP.rWri],
-    setup:"Phone <strong>side on and low</strong> — around knee height — 8–10 ft away. The bar, your hips and your shoulders all need to be in frame.",
-    setup2:"Low and side on is what lets it see the fault that matters most in sumo: whether your hips shoot up before the bar leaves the floor.",
+    setup:"Phone <strong>head on and low</strong> — around knee height — 8–10 ft away. The bar, your hips and your shoulders all need to be in frame.",
+    setup2:"The fault that matters most in sumo — hips shooting up before the bar leaves the floor — is a race between two heights, and heights read true from the front. Side on adds joint angles at lockout.",
     measures:[["Hip timing","Whether your hips rise before the bar moves"],
-              ["Lockout","Hip and knee extension at the top"],
+              ["Lockout","Knee extension at the top — needs a side view"],
               ["Grind","Whether the bar stalled and restarted mid-pull"],
               ["Fatigue","How much pull speed falls across the set"]],
-    diagram:"low"
+    diagram:"front-low"
   }
 };
 
@@ -825,6 +836,7 @@ class Analyser{
        it lags the body it is dividing, and the ratio spikes by more than a rep
        is worth. Normalise against a scale that keeps up. */
     this.torsoQ=new OneEuro(2.0,0.0); this.torsoS=NaN;
+    this.ancXF=new OneEuro(1.0,0.0); this.ancX=null; this.xT=[];
     this.anchorY=null; this.anchored=false;
     this.ancMode=null; this.ancT0=null; this.ancN=0; this.ancP=0; this.ancMiss=null;
     this.state="CALIB"; this.calMin=null; this.calMax=null; this.calRun=0; this.calT0=null;
@@ -834,6 +846,8 @@ class Analyser{
     this.vel=0; this.prev=null; this.bestVel=0; this.maxRom=0;
     this.liveCue=null; this.cueAt=0; this.lastRepEnd=0; this.pending=null;
     this.rejects=[]; this.lastGoodT=0; this.pendingStill=false;
+    this.viewR=null; this.shoK=null; this.thighRef=null;
+    this.pitch=0; this.fpx=null; this.W=frameH;
   }
 
   geom(kps){
@@ -850,15 +864,75 @@ class Analyser{
 
   ready(kps){ return this.cfg.needs.every(i=>kps[i].s>MIN_SCORE); }
 
+  /* ---- phone tilt ------------------------------------------------------
+     A phone propped on the floor points up, and a camera that points up does
+     not photograph vertical distances evenly: the same half metre of hip
+     travel covers more rows low in the frame than high in it. Everything here
+     is a ratio of two heights, so that gradient goes straight into the answer
+     — at 30° it inflates range by nearly a fifth. Tilting the phone is a pure
+     rotation about the lens, which makes it a homography in the tilt and the
+     focal length alone: no distance, no camera height, nothing to measure in
+     the room. Undo it and the numbers are the ones a level camera would have
+     given — exactly so on the right focal length, and most of the way there
+     on a wrong one. The lens cannot be solved from the lifter: leaning brings
+     the shoulders a foot nearer the phone, which changes their apparent size
+     for reasons that have nothing to do with tilt and swamps what is being
+     looked for. So it comes from a typical field of view, and the correction
+     is reported as the approximation it is.                                 */
+  rectPt(x,y){
+    const th=this.pitch;
+    if(!th||!this.fpx||Math.abs(th)<0.05) return {x,y};
+    const f=this.fpx, cx=this.W/2, cy=this.H/2, xc=x-cx, yc=y-cy;
+    const c=Math.cos(th), sn=Math.sin(th), z=yc*sn+f*c;
+    if(z<f*0.15) return {x,y};                     // grazing the horizon; leave it
+    return {x:cx+f*xc/z, y:cy+f*(yc*c-f*sn)/z};
+  }
+  rectify(kps){
+    if(!this.pitch||!this.fpx||Math.abs(this.pitch)<0.05) return kps;
+    return kps.map(k=>{ const r=this.rectPt(k.x,k.y); return {x:r.x,y:r.y,s:k.s}; });
+  }
+
+  /* The tilt comes from the phone; the focal length does not, and guessing it
+     from a typical field of view leaves a few percent on the table. But a
+     length that does not change — shoulder width to a lens in front, torso to
+     one beside — must rectify to the same number wherever it sits in the
+     frame, and only the true focal length makes that so. Squatting samples it
+     at every height, so the set calibrates the lens it was shot on. */
+
+  /* Angles in the sagittal plane — torso lean, knee and elbow extension — are
+     only readable from the side. Head on they collapse toward the lens and
+     would report a straight limb whatever it was doing, so they are withheld
+     rather than guessed at. Heights are unaffected, which is why depth and
+     bar speed read true either way. */
+  frontOn(){ return this.viewR!=null&&this.viewR>0.45; }
+
+  /* Recent horizontal movement of the reference, in torso lengths. */
+  walking(t){
+    if(this.ancX==null) return false;
+    this.xT.push({t,x:this.ancX});
+    while(this.xT.length&&t-this.xT[0].t>1100) this.xT.shift();
+    if(this.xT.length<6) return false;
+    let lo=1e9,hi=-1e9;
+    for(const q of this.xT){ if(q.x<lo)lo=q.x; if(q.x>hi)hi=q.x; }
+    return hi-lo>0.55;
+  }
+
+  spanX(){
+    const c=this.cur; if(!c||this.ancX==null) return;
+    if(c.aMinX==null){ c.aMinX=c.aMaxX=this.ancX; return; }
+    if(this.ancX<c.aMinX) c.aMinX=this.ancX;
+    if(this.ancX>c.aMaxX) c.aMaxX=this.ancX;
+  }
+
   /* Side on, the far limb is behind the near one and the model is guessing at
      it. Averaging the pair is better when both are seen; insisting on both
      throws away a perfectly good reference when only one is. */
   anchorPt(name,g,kps){
-    if(name==="sho") return g.shoOK?{ok:true,y:g.sho.y}:{ok:false};
+    if(name==="sho") return g.shoOK?{ok:true,y:g.sho.y,x:g.sho.x}:{ok:false};
     const [l,r]=name==="ank"?[kps[KP.lAnk],kps[KP.rAnk]]:[kps[KP.lKne],kps[KP.rKne]];
-    if(l.s>MIN_SCORE&&r.s>MIN_SCORE) return {ok:true,y:(l.y+r.y)/2};
+    if(l.s>MIN_SCORE&&r.s>MIN_SCORE) return {ok:true,y:(l.y+r.y)/2,x:(l.x+r.x)/2};
     const b=l.s>=r.s?l:r;
-    return b.s>MIN_SCORE?{ok:true,y:b.y}:{ok:false};
+    return b.s>MIN_SCORE?{ok:true,y:b.y,x:b.x}:{ok:false};
   }
 
   push(text){ if(text) this.speech.push(text); }
@@ -958,7 +1032,8 @@ class Analyser{
               tBot:fromBottom?t:null,tCon:null,minV:0,maxV:0,
               xMin:p.x,xMax:p.x,fromBottom:!!fromBottom,
               zeroX:0,prevVs:0,pMin:null,pMax:0,depth:null,leanBot:null,leanMid:null,
-              minAscV:0,elbTop:null,kneeTop:null,hipTop:null,hipFirst:null};
+              minAscV:0,elbTop:null,kneeTop:null,hipTop:null,hipFirst:null,
+              aMinX:this.ancX,aMaxX:this.ancX,hipAngBot:null,thighBot:null};
   }
 
   /* Threshold crossings tell us a rep happened; they are the wrong place to
@@ -1011,7 +1086,8 @@ class Analyser{
             conMs:Math.max(1,seg[cEnd].t-seg[cStart].t)};
   }
 
-  update(kps,t){
+  update(rawKps,t){
+    const kps=this.rectify(rawKps);
     const g=this.geom(kps);
     const miss=(!isFinite(g.torsoPx)||g.torsoPx<12)?"torso":(!this.ready(kps)?"kp":null);
     if(miss){
@@ -1019,8 +1095,28 @@ class Analyser{
         this.rejectRep(t,"lost",this.cfg.start==="bottom"?0:1);
       return {ok:false,reason:miss};
     }
-    this.torso=this.torsoF.filter(g.torsoPx,t);
-    this.torsoS=this.torsoQ.filter(g.torsoPx,t);
+    /* Shoulders read nearly their full width to a lens in front of you and
+       almost none of it to one beside you, which is enough to know which
+       measurements this view can support. Taken against the raw torso, never
+       the substituted scale below, or it would be measuring itself. */
+    const shoW=g.shoOK?dist(kps[KP.lSho],kps[KP.rSho]):NaN;
+    if(isFinite(shoW)&&isFinite(g.torsoPx)&&g.torsoPx>0){
+      const r=shoW/g.torsoPx;
+      this.viewR=this.viewR==null?r:0.97*this.viewR+0.03*r;
+    }
+
+    /* Everything is expressed in torso lengths, so the torso has to be the one
+       thing that does not change during a rep. Side on it isn't: the lean is in
+       the plane of the lens and shoulder-to-hip keeps its length. Head on it is
+       — at the bottom of a squat that distance is projecting about two thirds
+       of itself, which would quietly inflate every depth and every range by
+       half as much again. Shoulder width does not foreshorten when you lean
+       forward, so from the front measure that instead, converted to torso
+       lengths by the ratio between them while standing. */
+    let tPx=g.torsoPx;
+    if(this.frontOn()&&this.shoK!=null&&isFinite(shoW)&&shoW>6) tPx=this.shoK*shoW;
+    this.torso=this.torsoF.filter(tPx,t);
+    this.torsoS=this.torsoQ.filter(tPx,t);
     this.lastGoodT=t;
 
     const pt=this.cfg.track==="hip"?g.hip:g.wri;
@@ -1066,6 +1162,11 @@ class Analyser{
             :this.ancMode==="F"?(F.ok?F.y:null):(P.ok?P.y:null);
     if(ay!=null) this.anchorY=this.ancF.filter(ay,t);
     else if(this.anchorY==null) this.anchorY=this.H;
+    /* Where the feet are, across the frame. A squat drifts the knees forward a
+       fraction of a torso; a step is worth one and a half. */
+    const ax=(this.ancMode==="F"?(F.ok?F.x:null):(P.ok?P.x:(F.ok?F.x:null)));
+    if(ax!=null&&isFinite(this.torsoS)&&this.torsoS>0)
+      this.ancX=this.ancXF.filter(ax/this.torsoS,t);
     const s=this.sigF.filter((this.anchorY-pt.y)/this.torsoS,t);   // height above the reference
 
     if(this.t0==null) this.t0=t;
@@ -1074,6 +1175,19 @@ class Analyser{
       if(dt>0.004) this.vel=0.65*this.vel+0.35*((s-this.prev.s)/dt);
     }
     this.prev={t,s};
+    /* Standing still and upright, every proportion is seen at full length.
+       That is the only moment worth learning them from. */
+    if(this.stillSince!=null&&t-this.stillSince>250&&
+       (this.state==="TOP"||this.state==="CALIB")&&isFinite(g.torsoPx)&&g.torsoPx>0){
+      if(g.hipOK&&g.kneOK){
+        const th=dist(g.hip,g.kne)/g.torsoPx;
+        if(th>0.55&&th<1.40) this.thighRef=this.thighRef==null?th:0.9*this.thighRef+0.1*th;
+      }
+      if(isFinite(shoW)&&shoW>6){
+        const k=g.torsoPx/shoW;
+        if(k>0.7&&k<3.0) this.shoK=this.shoK==null?k:0.9*this.shoK+0.1*k;
+      }
+    }
     if(Math.abs(this.vel)>0.05) this.stillSince=null;
     else if(this.stillSince==null) this.stillSince=t;
     const stillFor=this.stillSince==null?0:t-this.stillSince;
@@ -1125,30 +1239,35 @@ class Analyser{
         else if(stillFor>700&&!this.reps.length){
           this.topRef=s; this.botRef=s-this.cfg.rom0;
         }
-        if(p<0.80&&this.vel<-vEps){
+        if(p<0.80&&this.vel<-vEps&&!this.walking(t)){
           if(this.mode==="comp"&&this.key!=="sumo"&&this.comp.phase!=="ready") this.comp.early.start=true;
           this.state="DESC"; this.startRep(t,g,false);
         }
         break;
 
       case "DESC":
+        this.spanX();
         if(s<this.cur.sBot) this.cur.sBot=s;
         if(this.cur.pMin==null||p<this.cur.pMin) this.cur.pMin=p;
         this.cur.minV=Math.min(this.cur.minV,this.vel);
         if(this.vel>-vEps&&p<0.55){
-          this.state="BOTTOM"; this.cur.tBot=t; this.captureBottom(g,kps);
+          this.state="BOTTOM"; this.cur.tBot=t; this.captureBottom(g,rawKps);
         } else if(p>0.88&&this.cur.pMin>0.55){
           /* Turning around at 90% of the way up is a bailed rep and worth
-             saying. Dipping a fifth of the range is getting under the bar. */
-          if(this.cur.pMin>0.72) this.abandon(s); else this.rejectRep(t,"shallow",p);
+             saying — but only once the set has a range of its own to judge
+             against. Before the first rep the app has no business calling
+             anything a failed lift; it is watching a man walk to a rack. */
+          if(this.cur.pMin>0.72||!this.reps.length) this.abandon(s);
+          else this.rejectRep(t,"shallow",p);
         } else if(stillFor>800&&this.cur.pMin>0.60&&!this.reps.length){
           this.abandon(s);                        // shifted about on the walkout, then stopped
         }
         break;
 
       case "BOTTOM":
-        if(!this.cur){ this.startRep(t,g,true); this.captureBottom(g,kps); }
-        if(s<this.cur.sBot){ this.cur.sBot=s; this.captureBottom(g,kps); }
+        if(!this.cur){ this.startRep(t,g,true); this.captureBottom(g,rawKps); }
+        this.spanX();
+        if(s<this.cur.sBot){ this.cur.sBot=s; this.captureBottom(g,rawKps); }
         if(this.vel>vEps){
           if(this.mode==="comp"&&this.key==="bench"&&this.comp.cmdAt.press==null) this.comp.early.press=true;
           this.state="ASC"; this.cur.tCon=t;
@@ -1157,6 +1276,7 @@ class Analyser{
         break;
 
       case "ASC":{
+        this.spanX();
         if(p>this.cur.pMax) this.cur.pMax=p;
         this.cur.minAscV=Math.min(this.cur.minAscV,this.vel);
 
@@ -1171,7 +1291,7 @@ class Analyser{
           if(rise>this.cur.riseMax) this.cur.riseMax=rise;
           const real=drop>=(this.reps.length?0.60*this.maxRom:0.45*this.cfg.rom0);
           if(!real&&!this.reps.length&&stillFor>800){ this.abandon(s); break; }
-          if(real&&rise>=0.90*drop&&this.vel<vEps){
+          if(real&&rise>=0.90*drop&&this.vel<vEps&&this.isRep()){
             const top=this.cur.sBot+drop;
             this.topRef=Math.abs(this.topRef-top)>0.15?top:0.7*this.topRef+0.3*top;
             this.botRef=Math.min(this.botRef,this.topRef-0.25);
@@ -1180,7 +1300,8 @@ class Analyser{
           /* Only a genuine bail from here: a rep that got most of the way home
              has finished, whatever the reference says. */
           if(this.cur.riseMax<0.75*drop&&this.cur.pMax>0.45&&p<0.30){
-            this.rejectRep(t,"sank",p); break;
+            if(this.reps.length) this.rejectRep(t,"sank",p); else this.abandon(s);
+            break;
           }
         } else if(this.cur.pMax>0.45&&p<0.30){ this.rejectRep(t,"sank",p); break; }
         this.cur.maxV=Math.max(this.cur.maxV,this.vel);
@@ -1207,7 +1328,7 @@ class Analyser{
           this.cur.kneeTop=angleAt(g.hip,g.kne,g.ank);
           this.cur.hipTop=angleAt(g.sho,g.hip,g.kne);
         }
-        if(p>0.88) this.finishRep(t);
+        if(p>0.88){ if(this.isRep()) this.finishRep(t); else this.abandon(s); }
         break;
       }
     }
@@ -1218,31 +1339,45 @@ class Analyser{
        second and a half is not grinding through one. */
     if(this.cur&&!this.reps.length&&t-this.cur.tStart>8000&&stillFor>1500) this.abandon(s);
     else if(this.cur&&t-this.cur.tStart>20000) this.rejectRep(t,"timeout",p);  // racked / walked away
-    return {ok:true,g,s,p,depth:this.key==="squat"?this.depthNow(kps):null};
+    return {ok:true,g,s,p,depth:this.key==="squat"?this.depthNow(rawKps):null};
   }
 
   /* Side on, the far leg is occluded and the model is guessing at it. Averaging
      that guess with the near leg drags the measurement around, which is why a
      head-on view has been reading truer than the side. Use whichever leg the
      model is actually confident about instead of the midpoint of both. */
-  depthNow(kps){
+  depthNow(rawKps){
+    const kps=this.rectify(rawKps);
     const L=Math.min(kps[KP.lHip].s,kps[KP.lKne].s),
           R=Math.min(kps[KP.rHip].s,kps[KP.rKne].s);
     if(Math.max(L,R)<=MIN_SCORE||!isFinite(this.torso)||this.torso<=0) return null;
     const useL=L>=R;
     const hip=useL?kps[KP.lHip]:kps[KP.rHip], kne=useL?kps[KP.lKne]:kps[KP.rKne];
+    /* Drawn on the video frame, so the guide lines stay in its coordinates. */
+    const rHip=useL?rawKps[KP.lHip]:rawKps[KP.rHip], rKne=useL?rawKps[KP.lKne]:rawKps[KP.rKne];
+    const rThigh=dist(rHip,rKne);
     /* Shift the joint centres to the crease and the top of the knee before
        comparing: +ve means hip crease below the top of the knee. */
-    const thigh=dist(hip,kne);
+    /* The crease sits below the hip joint and the top of the knee above its
+       centre, both by a fraction of femur length. Measured live, that femur is
+       whatever the lens can see of it — and at the bottom of a squat, head on,
+       it points at the lens and all but disappears, taking the correction with
+       it and calling every legal rep high. Use the length learned standing. */
+    const thigh=this.thighRef!=null?this.thighRef*this.torso:dist(hip,kne);
     return {d:(hip.y-kne.y+HIP_CREASE_K*thigh)/this.torso,
-            conf:Math.max(L,R), side:useL?"L":"R", hip, kne, thigh,
-            creaseY:hip.y+CREASE_K*thigh, kneeTopY:kne.y-KNEETOP_K*thigh};
+            conf:Math.max(L,R), side:useL?"L":"R", thigh,
+            hip:rHip, kne:rKne,
+            creaseY:rHip.y+CREASE_K*rThigh, kneeTopY:rKne.y-KNEETOP_K*rThigh};
   }
 
   captureBottom(g,kps){
     if(!this.cur) return;
     this.pendingStill=true;      // this frame is the deepest seen so far in the rep
     if(g.shoOK&&g.hipOK) this.cur.leanBot=torsoLean(g.sho,g.hip);
+    if(g.shoOK&&g.hipOK&&g.kneOK&&isFinite(this.torso)&&this.torso>0){
+      this.cur.hipAngBot=angleAt(g.sho,g.hip,g.kne);
+      this.cur.thighBot=dist(g.hip,g.kne)/this.torso;
+    }
     const dn=kps?this.depthNow(kps):null;
     if(dn){ this.cur.depth=dn.d; this.cur.depthConf=dn.conf; }
   }
@@ -1262,6 +1397,29 @@ class Analyser{
     this.push("Ready.");
     this.liveCue={sev:"good",label:"Re-zeroed",text:this.cfg.calib,speak:null};
     this.cueAt=t!=null?t:(this.prev?this.prev.t:0);
+  }
+
+  /* Is what just happened a rep at all? Before a set has a measured range there
+     is nothing to compare against, and ducking under the bar on the walkout
+     looks a great deal like a shallow squat. So ask what the body did rather
+     than how far the tracked point moved. */
+  isRep(){
+    const c=this.cur;
+    if(!c||c.fromBottom) return true;              // a pull starts on the floor
+    /* Measured from the top, not from where the descent tripped the threshold
+       a fifth of the way down — that dead zone is a fifth of the range, and
+       counting it as missing range turns a legal squat into a non-rep. */
+    const drop=Math.max(c.sStart,this.topRef)-c.sBot;
+    if(drop<(this.reps.length?0.40*this.maxRom:0.45*this.cfg.rom0)) return false;
+    /* Feet stay planted through a squat. They do not through a walkout. */
+    if(c.aMinX!=null&&c.aMaxX-c.aMinX>0.60) return false;
+    /* Until the set has a range of its own, the thing that separates a squat
+       from ducking under the bar is simply how far down the hips got. Standing
+       reads about −0.75; even a high squat that would be turned down on a
+       platform reads better than −0.3. Nothing legal sits below this. */
+    if(this.key==="squat"&&!this.reps.length&&c.depth!=null&&
+       c.depth+Calib.depth<-0.45) return false;
+    return true;
   }
 
   /* Not every false start deserves an announcement. Movement during the
@@ -1314,24 +1472,24 @@ class Analyser{
         else if(d<0.02) faults.push(["good","Parallel","Hip crease level with the top of the knee"]);
         else            faults.push(["good","Below parallel",`Hip crease ${cm(d)} torso lengths below the top of the knee`]);
       }
-      if(c.leanBot!=null&&c.leanMid!=null&&c.leanMid-c.leanBot>11)
+      if(!this.frontOn()&&c.leanBot!=null&&c.leanMid!=null&&c.leanMid-c.leanBot>11)
         faults.push(["fault","Hips first",`Chest dropped ${Math.round(c.leanMid-c.leanBot)}° further on the way up`]);
       if(eccMs!=null&&eccMs<520)
         faults.push(["fault","Dropped in",`Eccentric was only ${(eccMs/1000).toFixed(2)}s`]);
     }
     if(this.key==="bench"){
-      if(c.elbTop!=null&&c.elbTop<158)
+      if(!this.frontOn()&&c.elbTop!=null&&c.elbTop<158)
         faults.push(["fault","Short lockout",`Elbows reached ${Math.round(c.elbTop)}° of 180°`]);
       if(pauseMs!=null&&pauseMs<70&&eccMs!=null&&eccMs<700)
         faults.push(["fault","Bounced","No control at the chest"]);
       const drift=(c.xMax-c.xMin)/this.torso;
-      if(isFinite(drift)&&drift>0.30)
+      if(!this.frontOn()&&isFinite(drift)&&drift>0.30)
         faults.push(["fault","Bar drift",`Bar travelled ${drift.toFixed(2)} torso lengths horizontally`]);
     }
     if(this.key==="sumo"){
       if(c.hipFirst!=null&&c.hipFirst>1.7)
         faults.push(["fault","Hips first",`Hips rose ${c.hipFirst.toFixed(1)}× faster than the bar off the floor`]);
-      if(c.kneeTop!=null&&c.kneeTop<163)
+      if(!this.frontOn()&&c.kneeTop!=null&&c.kneeTop<163)
         faults.push(["fault","Soft lockout",`Knees reached ${Math.round(c.kneeTop)}°`]);
       if(c.zeroX>=3)
         faults.push(["fault","Grind","The bar stalled and restarted mid-pull"]);
@@ -1413,6 +1571,12 @@ class Analyser{
           faults:[],nRejects:this.rejects.length,tut:0,trace:this.packTrace()},this.compBits());
       return null;
     }
+    const front=this.frontOn();
+    const unchecked=!front?[]:({
+      squat:["Torso angle — whether your hips outrun your chest"],
+      sumo :["Knee and hip lockout angles"],
+      bench:["Elbow lockout","Bar path"]
+    }[this.key]||[]);
     const roms=R.map(r=>r.rom), vels=R.map(r=>r.meanVel), cons=R.map(r=>r.conMs);
     const maxRom=Math.max(...roms), bestVel=Math.max(...vels), lastVel=vels[vels.length-1];
     const velLoss=bestVel>0?clamp((bestVel-lastVel)/bestVel*100,0,100):0;
@@ -1456,6 +1620,8 @@ class Analyser{
     return Object.assign({reps:R,quality,sRom,sTempo,sForm,velLoss,rir,rirNote,maxRom,bestVel,
             romPcts,tempoCV,lift:this.key,trace:this.packTrace(),
             faults:[...rbag.values()].concat(faults), nRejects:this.rejects.length,
+            front,unchecked,viewR:this.viewR==null?null:+this.viewR.toFixed(2),
+            tilt:this.pitch?Math.round(this.pitch*180/Math.PI):0,
             tut:R.reduce((a,r)=>a+(r.eccMs||0)+(r.pauseMs||0)+r.conMs,0)/1000},this.compBits());
   }
 }
@@ -1465,7 +1631,8 @@ class Analyser{
    ============================================================ */
 const App={
   lift:"squat", stream:null, running:false, analyser:null,
-  facing:"environment", fps:0, frames:0, fpsT:0, scopeBox:null,
+  facing:"user", fps:0, frames:0, fpsT:0, scopeBox:null,
+  tilt:0, setTilt:0, tiltArmed:false,
   wakeLock:null, installPrompt:null, phase:null, spokenAt:0,
   mode:"training", recordOn:true, rec:null, chunks:[], recStart:0,
   lastRec:null, videoUrl:null, videoUrlFor:null,
@@ -1523,7 +1690,7 @@ const App={
     $("btn-history").onclick=()=>{renderHistoryInto();show("s-history");};
     $("btn-hist-close").onclick=()=>show("s-setup");
     $("btn-review-close").onclick=()=>show("s-setup");
-    $("btn-start").onclick=()=>this.start();
+    $("btn-start").onclick=()=>{ this.armTilt(); this.start(); };
     $("btn-stop").onclick=()=>this.stop();
     $("btn-rezero").onclick=()=>{ if(this.analyser) this.analyser.rezero(performance.now()); };
     Voice.init();
@@ -1629,6 +1796,26 @@ const App={
       `<div class="measure"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
   },
 
+  /* Which way the phone is pointing. The screen normal's elevation above the
+     horizon is asin(cos β · cos γ) — independent of which way the lifter is
+     facing and of how the screen happens to be rotated, so there is no
+     portrait-versus-landscape case to get wrong. The front camera looks along
+     that normal; the rear one looks against it. */
+  armTilt(){
+    if(this.tiltArmed) return;
+    this.tiltArmed=true;
+    const attach=()=>window.addEventListener("deviceorientation",e=>{
+      if(e.beta==null||e.gamma==null) return;
+      const b=e.beta*Math.PI/180, g=e.gamma*Math.PI/180;
+      const up=Math.asin(clamp(Math.cos(b)*Math.cos(g),-1,1));
+      this.tilt=this.facing==="user"?up:-up;
+    },{passive:true});
+    const D=window.DeviceOrientationEvent;
+    if(D&&typeof D.requestPermission==="function")
+      D.requestPermission().then(r=>{ if(r==="granted") attach(); }).catch(()=>{});
+    else if(D) attach();
+  },
+
   async start(){
     try{
       this.stream=await navigator.mediaDevices.getUserMedia({
@@ -1644,6 +1831,9 @@ const App={
     this.lockScreen();
     Voice.prime();
     this.phase=null; this.spokenAt=0;
+    /* Frozen for the set: the phone is not moving, and a reading that wandered
+       would step every measurement that depends on it. */
+    this.setTilt=this.tilt||0;
     this.analyser=new Analyser(this.lift,v.videoHeight||720,this.mode);
     this.startRecording();
     this.running=true; this.frames=0; this.fpsT=performance.now(); this.scopeBox=null;
@@ -1691,7 +1881,20 @@ const App={
     if(v.readyState<2){ requestAnimationFrame(()=>this.loop()); return; }
 
     const vw=v.videoWidth, vh=v.videoHeight;
-    if(ov.width!==vw||ov.height!==vh){ ov.width=vw; ov.height=vh; if(this.analyser) this.analyser.H=vh; }
+    if(ov.width!==vw||ov.height!==vh){
+      ov.width=vw; ov.height=vh;
+      const a=this.analyser;
+      if(a){
+        a.H=vh; a.W=vw;
+        /* The lens is not knowable from the browser, so it comes from a typical
+           field of view — wide for a selfie camera, less so for the main one.
+           A focal length well wide of the mark still removes most of the tilt;
+           the correction is reported as approximate for that reason. */
+        const dfov=(this.facing==="user"?85:78)*Math.PI/180;
+        a.fpx=(Math.hypot(vw,vh)/2)/Math.tan(dfov/2);
+        a.pitch=this.setTilt||0;
+      }
+    }
 
     const scale=Math.min(192/vw,192/vh);                 // letterbox into the model input
     const dw=vw*scale, dh=vh*scale, dx=(192-dw)/2, dy=(192-dh)/2;
@@ -1896,6 +2099,7 @@ function drawScope(a){
 }
 
 function diagramSVG(kind){
+  if(kind==="front"||kind==="front-low") return frontDiagram(kind==="front-low");
   const low=kind==="low", headY=low?46:28, barY=low?66:44, phoneY=low?58:44, lensY=low?71:57;
   return `<svg viewBox="0 0 300 96" role="img" aria-label="Phone placed side on, 8 to 10 feet from the lifter">
     <defs><marker id="ar" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
@@ -1910,7 +2114,49 @@ function diagramSVG(kind){
     <circle cx="41.5" cy="${lensY}" r="2.6" fill="#F0A828"/>
     <path d="M49 ${lensY} L232 ${low?18:6} M49 ${lensY} L232 ${low?92:88}" stroke="#2B3541" stroke-width="1" stroke-dasharray="3 4"/>
     <line x1="41" y1="90" x2="196" y2="90" stroke="#5C6775" stroke-width="1" marker-end="url(#ar)"/>
-    <text x="118" y="87" text-anchor="middle" fill="#5C6775" font-family="IBM Plex Mono, monospace" font-size="8.5" letter-spacing="1">8–10 FT</text>
+    <text x="118" y="87" text-anchor="middle" fill="#5C6775" font-family="IBM Plex Mono, monospace" font-size="8.5" letter-spacing="1">8\u201310 FT</text>
+    <text x="41" y="${phoneY-6}" text-anchor="middle" fill="#8892A1" font-family="IBM Plex Mono, monospace" font-size="8" letter-spacing="1.2">PHONE</text>
+  </svg>`;
+}
+
+/* Head on, the lifter faces the lens: shoulders read wide and the bar is seen
+   across them with a plate at each end, which is what tells the two views
+   apart at a glance. */
+function frontDiagram(low){
+  /* Sumo head on is a wide stance with the hands gripping inside the knees,
+     and a trunk that is hinged over so it reads short. Legs from a single hip
+     point and arms angled in keeps the two sets of limbs apart at this size —
+     a hip bar as wide as the shoulders just makes a barrel of it. */
+  const headY=low?39:24, shoY=low?52:36, hipY=low?63:57,
+        barY=low?74:33, barX=low?[158,234]:[166,226], plate=low?6:5.5,
+        footX=low?[174,218]:[184,208], footY=low?74:80,
+        armX=low?[190,202]:[176,216], armY=low?71:34,
+        phoneY=low?58:44, lensY=low?71:57;
+  const frame=low
+    ? `M196 ${headY+6} V${shoY} M181 ${shoY} h30 M196 ${shoY} V${hipY}
+       M196 ${hipY} L${footX[0]} ${footY} M196 ${hipY} L${footX[1]} ${footY}
+       M182 ${shoY+1} L${armX[0]} ${armY} M210 ${shoY+1} L${armX[1]} ${armY}`
+    : `M196 ${headY+6} V${shoY} M183 ${shoY} h26 M196 ${shoY} V${hipY}
+       M188 ${hipY} h16 M188 ${hipY} L${footX[0]} 80 M204 ${hipY} L${footX[1]} 80
+       M184 ${shoY} L${armX[0]} ${armY} M208 ${shoY} L${armX[1]} ${armY}`;
+  return `<svg viewBox="0 0 300 96" role="img" aria-label="Phone facing the lifter head on, 8 to 10 feet away">
+    <defs><marker id="arf" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+      <path d="M0 0 L7 3.5 L0 7 z" fill="#5C6775"/></marker></defs>
+    <line x1="16" y1="80" x2="284" y2="80" stroke="#2B3541" stroke-width="1.5"/>
+
+    <circle cx="196" cy="${headY}" r="6" fill="none" stroke="#E9EDF3" stroke-width="1.8"/>
+    <path d="${frame}"
+          fill="none" stroke="#E9EDF3" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <line x1="${barX[0]}" y1="${barY}" x2="${barX[1]}" y2="${barY}" stroke="#F0A828" stroke-width="2.2" stroke-linecap="round"/>
+    <circle cx="${barX[0]}" cy="${barY}" r="${plate}" fill="none" stroke="#F0A828" stroke-width="2.2"/>
+    <circle cx="${barX[1]}" cy="${barY}" r="${plate}" fill="none" stroke="#F0A828" stroke-width="2.2"/>
+
+    <rect x="34" y="${phoneY}" width="15" height="26" rx="3" fill="none" stroke="#F0A828" stroke-width="1.8"/>
+    <circle cx="41.5" cy="${lensY}" r="2.6" fill="#F0A828"/>
+    <path d="M49 ${lensY} L236 ${low?14:4} M49 ${lensY} L236 80" stroke="#2B3541" stroke-width="1" stroke-dasharray="3 4"/>
+    <line x1="41" y1="90" x2="196" y2="90" stroke="#5C6775" stroke-width="1" marker-end="url(#arf)"/>
+    <text x="118" y="87" text-anchor="middle" fill="#5C6775" font-family="IBM Plex Mono, monospace" font-size="8.5" letter-spacing="1">8\u201310 FT</text>
     <text x="41" y="${phoneY-6}" text-anchor="middle" fill="#8892A1" font-family="IBM Plex Mono, monospace" font-size="8" letter-spacing="1.2">PHONE</text>
   </svg>`;
 }
@@ -1978,6 +2224,25 @@ function renderReview(rec){
   }
 
   $("review-body").innerHTML=`
+    ${(s.tilt&&Math.abs(s.tilt)>=8)?`
+    <div class="viewnote">
+      <span class="vk">Tilt ${Math.abs(s.tilt)}\u00B0</span>
+      <span class="vt">The phone was pointing ${s.tilt>0?"up":"down"}, which spreads
+        vertical distances unevenly across the frame — at this angle it would have
+        inflated range by about <b>${Math.round(Math.abs(s.tilt)*0.9)}%</b>. That has been
+        taken out. The lens itself can only be assumed, so a little of it may remain;
+        depth is barely touched by tilt either way.</span>
+    </div>`:""}
+
+    ${(s.unchecked&&s.unchecked.length)?`
+    <div class="viewnote">
+      <span class="vk">Head on</span>
+      <span class="vt">Depth, range and bar speed read true from the front. ${
+        s.unchecked.length===1?"One measurement needs":"These need"} a side view and
+        ${s.unchecked.length===1?"was":"were"} left out rather than guessed at:
+        <b>${s.unchecked.join("</b>, <b>")}</b>.</span>
+    </div>`:""}
+
     ${hasVideo?`
     <div class="chart-card">
       <video id="rv-video" playsinline controls preload="metadata"></video>
