@@ -1,5 +1,5 @@
 /* Rep Scope service worker — same-origin cache-first, so the app works offline. */
-const CACHE = "repscope-12edd474d8";
+const CACHE = "repscope-57f4493851";
 const ASSETS = ["./", "./index.html", "./manifest.webmanifest",
                 "./icon-180.png", "./icon-192.png", "./icon-512.png", "./icon-maskable-512.png"];
 

@@ -483,6 +483,30 @@ const KP={nose:0,lEye:1,rEye:2,lEar:3,rEar:4,lSho:5,rSho:6,lElb:7,rElb:8,
 const EDGES=[[5,6],[5,7],[7,9],[6,8],[8,10],[5,11],[6,12],[11,12],[11,13],[13,15],[12,14],[14,16]];
 const MIN_SCORE=0.32;
 
+/* The depth rule is written about the hip CREASE against the TOP of the knee.
+   MoveNet gives neither: its hip keypoint is the hip joint centre, which sits
+   above the crease, and its knee keypoint is the joint centre, which sits below
+   the top of the knee. Both errors demand extra depth, so comparing the raw
+   keypoints is several centimetres stricter than the rule and fails lifters who
+   are comfortably legal. Correct by a fraction of thigh length so it scales
+   with the lifter rather than assuming a body size.
+   ~0.09 thigh for the crease offset, ~0.06 for the top of the knee. These are
+   population averages, which is why Calib below exists. */
+const HIP_CREASE_K=0.15;
+
+/* One lifter's own anatomy beats a population average. This lets a rep the
+   lifter knows was legal set their personal reference. */
+const Calib={
+  depth:0,
+  load(){
+    try{ const v=parseFloat(localStorage.getItem("repscope.depthOffset"));
+         if(isFinite(v)) this.depth=v; }catch(e){}
+  },
+  set(v){ this.depth=v; try{ localStorage.setItem("repscope.depthOffset",String(v)); }catch(e){} },
+  reset(){ this.depth=0; try{ localStorage.removeItem("repscope.depthOffset"); }catch(e){} },
+  get on(){ return Math.abs(this.depth)>1e-6; }
+};
+
 /* Per-lift configuration.
    track  — the point whose height is the primary signal
    start  — where a set begins: squat/bench start locked out at the top,
@@ -833,7 +857,7 @@ class Analyser{
     if(this.key==="squat"){
       if(C.early.start) bad.push("Started before the command");
       if(c.depth==null) bad.push("Depth not visible");
-      else if(c.depth<-0.02) bad.push("Depth high");
+      else if(c.depth+Calib.depth<-0.02) bad.push("Depth high");
     }
     if(this.key==="bench"){
       if(C.early.start) bad.push("Lowered before the command");
@@ -1046,7 +1070,13 @@ class Analyser{
   captureBottom(g){
     if(!this.cur) return;
     if(g.shoOK&&g.hipOK) this.cur.leanBot=torsoLean(g.sho,g.hip);
-    if(g.hipOK&&g.kneOK) this.cur.depth=(g.hip.y-g.kne.y)/this.torso;  // +ve = hip below knee
+    if(g.hipOK&&g.kneOK){
+      const thigh=dist(g.hip,g.kne);
+      /* Shift the joint centres to the crease and the top of the knee before
+         comparing: +ve now means hip crease below the top of the knee. */
+      this.cur.depth=(g.hip.y-g.kne.y+HIP_CREASE_K*thigh)/this.torso;
+      this.cur.depthRaw=(g.hip.y-g.kne.y)/this.torso;
+    }
   }
 
   /* A rep that started and never finished. Saying why is the whole point —
@@ -1086,9 +1116,10 @@ class Analyser{
 
     if(this.key==="squat"){
       if(c.depth!=null){
-        if(c.depth<-0.045)      faults.push(["fault","High","Hip crease stayed above the knee"]);
-        else if(c.depth<0.015)  faults.push(["good","Parallel","Hip level with the knee"]);
-        else                    faults.push(["good","Below parallel","Hip crease under the knee"]);
+        const d=c.depth+Calib.depth, cm=(x)=>x.toFixed(3);
+        if(d<-0.03)     faults.push(["fault","High",`Hip crease ${cm(-d)} torso lengths above the top of the knee`]);
+        else if(d<0.02) faults.push(["good","Parallel","Hip crease level with the top of the knee"]);
+        else            faults.push(["good","Below parallel",`Hip crease ${cm(d)} torso lengths below the top of the knee`]);
       }
       if(c.leanBot!=null&&c.leanMid!=null&&c.leanMid-c.leanBot>11)
         faults.push(["fault","Hips first",`Chest dropped ${Math.round(c.leanMid-c.leanBot)}° further on the way up`]);
@@ -1114,7 +1145,8 @@ class Analyser{
     }
 
     const rep={i:this.reps.length+1,eccMs,pauseMs,conMs,rom,meanVel,peakVel:c.maxV,
-               faults,tEnd:t-this.t0,tStart:c.tStartRel};
+               faults,tEnd:t-this.t0,tStart:c.tStartRel,
+               depth:c.depth==null?null:+(c.depth).toFixed(4)};
     this.reps.push(rep);
     this.maxRom=Math.max(this.maxRom,rom);
     this.bestVel=Math.max(this.bestVel,meanVel);
@@ -1242,7 +1274,7 @@ const App={
   facing:"environment", fps:0, frames:0, fpsT:0, scopeBox:null,
   wakeLock:null, installPrompt:null, phase:null, spokenAt:0,
   mode:"training", recordOn:true, rec:null, chunks:[], recStart:0,
-  lastRec:null, videoUrl:null,
+  lastRec:null, videoUrl:null, videoUrlFor:null,
   proc:document.createElement("canvas"),
 
   /* ---- set recording -------------------------------------------------
@@ -1329,6 +1361,7 @@ const App={
       try{ localStorage.setItem("repscope.record",this.recordOn?"on":"off"); }catch(e){}
       paintRec();
     });
+    Calib.load();
     Store.migrate().catch(()=>{});
 
     $("facing-seg").addEventListener("click",e=>{
@@ -1620,6 +1653,12 @@ function diagramSVG(kind){
 /* ============================================================
    7. REVIEW
    ============================================================ */
+function depthWord(d){
+  if(d==null) return "—";
+  const v=d+Calib.depth;
+  return (Math.abs(v)).toFixed(3)+(v>=0?" below":" above");
+}
+
 function scoreColor(v){ return v>=80?"var(--good)":v>=60?"var(--amber)":"var(--fault)"; }
 
 function qualityWords(q){
@@ -1652,6 +1691,9 @@ function renderReview(rec){
   const romPcts=(s.romPcts||[]).map(v=>Math.round(v));
   const trace=s.trace||[];               // already packed down when the set was saved
   const hasVideo=!!rec.video;
+  const depths=(s.reps||[]).map(r=>r.depth).filter(v=>v!=null);
+  const shallow=depths.length?Math.min(...depths):null;   // the borderline rep
+  const deepest=depths.length?Math.max(...depths):null;
   let tracePath="",markers="";
   if(trace.length>4){
     let lo=Infinity,hi=-Infinity;
@@ -1756,6 +1798,34 @@ function renderReview(rec){
         <span class="txt"><b>${f.label}</b><span>${f.text}</span></span></div>`).join("")}</div>
     </div>`:""}
 
+    ${depths.length&&liftKey==="squat"?`
+    <div>
+      <div class="section-label"><span class="eyebrow">Depth calibration</span><span class="rule"></span></div>
+      <div class="chart-card">
+        <div class="chart-head">
+          <div class="t">${Calib.on?"Calibrated to you":"Using default anatomy"}</div>
+          <div class="s">The camera sees joint centres, not the hip crease and the top of the knee that the
+          depth rule is written about. ${Calib.on
+            ? "Your own reference is in use, so these calls are pinned to your body."
+            : "It corrects for that using population averages, which can be a little off for any one lifter."}</div>
+        </div>
+        <div class="stat-row">
+          <div class="stat"><div class="k">Shallowest rep</div><div class="v">${depthWord(shallow)}</div></div>
+          <div class="stat"><div class="k">Deepest rep</div><div class="v">${depthWord(deepest)}</div></div>
+          <div class="stat"><div class="k">Offset</div><div class="v">${Calib.on?(Calib.depth>0?"+":"")+Calib.depth.toFixed(3):"none"}</div></div>
+        </div>
+        <p class="note" style="margin-top:12px">
+          Watch your shallowest rep back first. If it was legal depth, calibrate to it and everything
+          at least that deep will pass from now on. If it wasn't, do the opposite.
+        </p>
+        <div class="btn-row" style="margin-top:10px">
+          <button class="sec-btn" id="btn-cal-legal" style="flex:1">Shallowest was legal</button>
+          <button class="sec-btn" id="btn-cal-high" style="flex:1">Shallowest was high</button>
+        </div>
+        ${Calib.on?`<button class="sec-btn" id="btn-cal-reset" style="width:100%;margin-top:8px">Reset to default anatomy</button>`:""}
+      </div>
+    </div>`:""}
+
     <div>
       <div class="section-label"><span class="eyebrow">Rep by rep</span><span class="rule"></span></div>
       <div class="chart-card"><div class="rt-wrap"><table class="rt">
@@ -1798,9 +1868,18 @@ function renderReview(rec){
 
   /* Hook up the clip and every seek control the report just rendered. */
   const vid=$("rv-video");
+  /* The report re-renders whenever depth is recalibrated. Revoking the clip's
+     URL each time cancels an in-flight load; keep it while the set is the same
+     and only release it when moving to a different one. */
+  if(App.videoUrl&&App.videoUrlFor!==rec.id){
+    try{ URL.revokeObjectURL(App.videoUrl); }catch(e){}
+    App.videoUrl=null; App.videoUrlFor=null;
+  }
   if(vid&&rec.video){
-    if(App.videoUrl){ try{ URL.revokeObjectURL(App.videoUrl); }catch(e){} }
-    try{ App.videoUrl=URL.createObjectURL(rec.video); vid.src=App.videoUrl; }catch(e){}
+    try{
+      if(!App.videoUrl){ App.videoUrl=URL.createObjectURL(rec.video); App.videoUrlFor=rec.id; }
+      vid.src=App.videoUrl;
+    }catch(e){}
   }
   const off=rec.videoOffset||0;
   $("review-body").querySelectorAll("[data-seek]").forEach(el=>{
@@ -1825,6 +1904,14 @@ function renderReview(rec){
     try{ await Store.del(rec.id); }catch(e){}
     renderHistoryInto(); show("s-history");
   };
+
+  /* Calibrate from a rep the lifter has actually watched back. Nudging just
+     past the boundary keeps their own rep legal without moving it further. */
+  const recal=(off)=>{ Calib.set(+off.toFixed(4)); renderReview(rec); };
+  const bl=$("btn-cal-legal"), bh=$("btn-cal-high"), br=$("btn-cal-reset");
+  if(bl) bl.onclick=()=>recal(0.025-shallow);
+  if(bh) bh.onclick=()=>recal(-0.035-shallow);
+  if(br) br.onclick=()=>{ Calib.reset(); renderReview(rec); };
 
   $("btn-again").onclick=()=>App.start();
   $("btn-to-history").onclick=()=>{renderHistoryInto();show("s-history");};
