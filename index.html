@@ -326,6 +326,15 @@ h1{margin:0;text-wrap:balance;font-weight:800;letter-spacing:-.02em;}
         </div>
 
         <div>
+          <div class="section-label"><span class="eyebrow">Spoken feedback</span><span class="rule"></span></div>
+          <div class="seg" id="voice-seg">
+            <button data-v="on" aria-pressed="true">Voice on</button>
+            <button data-v="off" aria-pressed="false">Voice off</button>
+          </div>
+          <p class="note" style="margin-top:8px">Calls each rep number out loud, and says why when a rep doesn't count.</p>
+        </div>
+
+        <div>
           <button class="primary-btn" id="btn-start" disabled><span id="start-label">Loading pose model…</span></button>
           <div class="loadbar" id="loadbar"><i></i></div>
           <p class="note" style="margin-top:12px" id="start-note">
@@ -524,6 +533,36 @@ class OneEuro{
 }
 
 /* ============================================================
+   2b. VOICE — the phone is across the room, so the count has to
+   carry. Kept terse on purpose: a number, or a short reason.
+   ============================================================ */
+const Voice={
+  on:true, primed:false,
+  init(){ try{ this.on=localStorage.getItem("repscope.voice")!=="off"; }catch(e){} },
+  set(v){ this.on=v; try{ localStorage.setItem("repscope.voice",v?"on":"off"); }catch(e){} if(!v) this.stop(); },
+  /* Android stays silent unless the first utterance happens inside a user
+     gesture, so this is called from the Start tap. */
+  prime(){
+    try{
+      if(!("speechSynthesis" in window)||this.primed) return;
+      const u=new SpeechSynthesisUtterance(" "); u.volume=0;
+      speechSynthesis.speak(u); this.primed=true;
+    }catch(e){}
+  },
+  say(text){
+    if(!this.on||!text) return;
+    try{
+      if(!("speechSynthesis" in window)) return;
+      speechSynthesis.cancel();          // a stale count is worse than a missed one
+      const u=new SpeechSynthesisUtterance(text);
+      u.rate=1.15; u.lang="en-US";
+      speechSynthesis.speak(u);
+    }catch(e){}
+  },
+  stop(){ try{ if("speechSynthesis" in window) speechSynthesis.cancel(); }catch(e){} }
+};
+
+/* ============================================================
    3. MODEL — built from the bytes embedded above
    ============================================================ */
 const Model={
@@ -588,6 +627,7 @@ class Analyser{
     this.reps=[]; this.trace=[]; this.t0=null; this.cur=null;
     this.vel=0; this.prev=null; this.bestVel=0; this.maxRom=0;
     this.liveCue=null; this.cueAt=0; this.lastRepEnd=0; this.pending=null;
+    this.rejects=[]; this.lastGoodT=0;
   }
 
   geom(kps){
@@ -610,7 +650,7 @@ class Analyser{
               sBot:this.prev?this.prev.s:this.botRef,
               tBot:fromBottom?t:null,tCon:null,minV:0,maxV:0,
               xMin:p.x,xMax:p.x,fromBottom:!!fromBottom,
-              zeroX:0,prevVs:0,depth:null,leanBot:null,leanMid:null,
+              zeroX:0,prevVs:0,pMin:null,pMax:0,depth:null,leanBot:null,leanMid:null,
               elbTop:null,kneeTop:null,hipFirst:null};
   }
 
@@ -666,9 +706,14 @@ class Analyser{
 
   update(kps,t){
     const g=this.geom(kps);
-    if(!isFinite(g.torsoPx)||g.torsoPx<12) return {ok:false,reason:"torso"};
+    const miss=(!isFinite(g.torsoPx)||g.torsoPx<12)?"torso":(!this.ready(kps)?"kp":null);
+    if(miss){
+      if(this.cur&&this.lastGoodT&&t-this.lastGoodT>800)
+        this.rejectRep(t,"lost",this.cfg.start==="bottom"?0:1);
+      return {ok:false,reason:miss};
+    }
     this.torso=this.torsoF.filter(g.torsoPx,t);
-    if(!this.ready(kps)) return {ok:false,reason:"kp"};
+    this.lastGoodT=t;
 
     const pt=this.cfg.track==="hip"?g.hip:g.wri;
     const s=this.sigF.filter((this.H-pt.y)/this.torso,t);   // height, torso lengths, up is +
@@ -700,15 +745,18 @@ class Analyser{
 
     switch(this.state){
       case "TOP":
-        this.topRef=0.94*this.topRef+0.06*Math.max(s,this.topRef-0.05);
+        if(p>0.85) this.topRef=0.94*this.topRef+0.06*Math.max(s,this.topRef-0.05);
         if(p<0.80&&this.vel<-vEps){ this.state="DESC"; this.startRep(t,g,false); }
         break;
 
       case "DESC":
         if(s<this.cur.sBot) this.cur.sBot=s;
+        if(this.cur.pMin==null||p<this.cur.pMin) this.cur.pMin=p;
         this.cur.minV=Math.min(this.cur.minV,this.vel);
         if(this.vel>-vEps&&p<0.55){
           this.state="BOTTOM"; this.cur.tBot=t; this.captureBottom(g);
+        } else if(p>0.88&&this.cur.pMin>0.55){
+          this.rejectRep(t,"shallow",p);          // back at the top having never gone down
         }
         break;
 
@@ -722,6 +770,8 @@ class Analyser{
         break;
 
       case "ASC":{
+        if(p>this.cur.pMax) this.cur.pMax=p;
+        if(this.cur.pMax>0.45&&p<0.30){ this.rejectRep(t,"sank",p); break; }  // got up, then sank
         this.cur.maxV=Math.max(this.cur.maxV,this.vel);
         const x=pt.x;
         this.cur.xMin=Math.min(this.cur.xMin,x); this.cur.xMax=Math.max(this.cur.xMax,x);
@@ -750,7 +800,7 @@ class Analyser{
       }
     }
     if(this.pending&&(t-this.t0)-this.pending.rep.tEnd>450) this.finalise();
-    if(this.cur&&t-this.cur.tStart>20000){ this.cur=null; this.state="TOP"; }  // racked / walked away
+    if(this.cur&&t-this.cur.tStart>20000) this.rejectRep(t,"timeout",p);   // racked / walked away
     return {ok:true,g,s,p};
   }
 
@@ -758,6 +808,26 @@ class Analyser{
     if(!this.cur) return;
     if(g.shoOK&&g.hipOK) this.cur.leanBot=torsoLean(g.sho,g.hip);
     if(g.hipOK&&g.kneOK) this.cur.depth=(g.hip.y-g.kne.y)/this.torso;  // +ve = hip below knee
+  }
+
+  /* A rep that started and never finished. Saying why is the whole point —
+     silence leaves you guessing whether the app missed it or you did. */
+  rejectRep(t,kind,p){
+    if(!this.cur) return;
+    const R={
+      shallow:["Came back up before reaching the bottom","Not counted. Too shallow."],
+      sank   :["Sank back down before finishing the lift","Not counted. Didn't finish."],
+      lost   :["Lost sight of your hips mid-rep","Not counted. Lost you."],
+      timeout:["Rep ran past 20 seconds — treated as a bail","Not counted. Timed out."]
+    }[kind]||["Rep didn't complete","Not counted."];
+    let text=R[0];
+    if(kind==="shallow"&&this.cur.pMin!=null)
+      text=`Turned around at ${Math.round((1-this.cur.pMin)*100)}% of your usual depth`;
+    this.rejects.push({t:t-this.t0,kind,text});
+    this.liveCue={sev:"fault",label:"Not counted",text,speak:R[1]};
+    this.cueAt=t;
+    this.cur=null;
+    this.state=p>0.6?"TOP":"BOTTOM";     // resume from wherever the lifter actually is
   }
 
   finishRep(t){
@@ -810,8 +880,12 @@ class Analyser{
     this.topRef=0.7*this.topRef+0.3*(r?r.sTop:c.sTop);
 
     const bad=faults.find(f=>f[0]==="fault");
-    this.liveCue=bad?{sev:"fault",label:bad[1],text:bad[2]}
-                    :{sev:"good",label:"Clean",text:`Rep ${rep.i} — ${rom.toFixed(2)} ROM at ${meanVel.toFixed(2)}/s`};
+    /* Spoken: the number, plus the fault in one word when there is one. The
+       phone is across the room, so anything longer arrives after the next rep. */
+    this.liveCue=bad
+      ?{sev:"fault",label:bad[1],text:bad[2],speak:`${rep.i}. ${bad[1]}.`}
+      :{sev:"good",label:"Clean",text:`Rep ${rep.i} — ${rom.toFixed(2)} ROM at ${meanVel.toFixed(2)}/s`,
+        speak:String(rep.i)};
     /* The rep is counted the moment it is unambiguous, so the display keeps up.
        Its numbers are settled a beat later, once the bar has actually stopped
        at the top — otherwise the concentric is cut short by however much of the
@@ -872,8 +946,15 @@ class Analyser{
     }));
     const faults=[...bag.values()].sort((a,b)=>(a.sev==="fault"?0:1)-(b.sev==="fault"?0:1)||b.n-a.n);
 
+    const rbag=new Map();
+    this.rejects.forEach(r=>{
+      if(!rbag.has(r.kind)) rbag.set(r.kind,{sev:"fault",label:"Not counted",text:r.text,n:0});
+      rbag.get(r.kind).n++;
+    });
+
     return {reps:R,quality,sRom,sTempo,sForm,velLoss,rir,rirNote,maxRom,bestVel,
-            romPcts,tempoCV,faults,lift:this.key,
+            romPcts,tempoCV,lift:this.key,
+            faults:[...rbag.values()].concat(faults), nRejects:this.rejects.length,
             tut:R.reduce((a,r)=>a+(r.eccMs||0)+(r.pauseMs||0)+r.conMs,0)/1000};
   }
 }
@@ -884,7 +965,7 @@ class Analyser{
 const App={
   lift:"squat", stream:null, running:false, analyser:null,
   facing:"environment", fps:0, frames:0, fpsT:0, scopeBox:null,
-  wakeLock:null, installPrompt:null,
+  wakeLock:null, installPrompt:null, phase:null, spokenAt:0,
   proc:document.createElement("canvas"),
 
   /* A phone propped against the rack gets no touch input, so the screen dims
@@ -908,6 +989,16 @@ const App={
     $("btn-review-close").onclick=()=>show("s-setup");
     $("btn-start").onclick=()=>this.start();
     $("btn-stop").onclick=()=>this.stop();
+    Voice.init();
+    const vseg=$("voice-seg");
+    const paintVoice=()=>[...vseg.children].forEach(c=>
+      c.setAttribute("aria-pressed",String((c.dataset.v==="on")===Voice.on)));
+    paintVoice();
+    vseg.addEventListener("click",e=>{
+      const b=e.target.closest("button[data-v]"); if(!b) return;
+      Voice.set(b.dataset.v==="on"); paintVoice();
+      if(Voice.on){ Voice.prime(); Voice.say("Voice on"); }   // also primes inside the tap
+    });
     $("facing-seg").addEventListener("click",e=>{
       const b=e.target.closest("button[data-f]"); if(!b) return;
       this.facing=b.dataset.f;
@@ -990,6 +1081,8 @@ const App={
     await v.play().catch(()=>{});
     show("s-live");
     this.lockScreen();
+    Voice.prime();
+    this.phase=null; this.spokenAt=0;
     this.analyser=new Analyser(this.lift,v.videoHeight||720);
     this.running=true; this.frames=0; this.fpsT=performance.now(); this.scopeBox=null;
     $("rep-count").textContent="0";
@@ -1002,6 +1095,7 @@ const App={
     if(!this.running) return;
     this.running=false;
     this.releaseScreen();
+    Voice.stop();
     if(this.stream){this.stream.getTracks().forEach(t=>t.stop());this.stream=null;}
     const sum=this.analyser?this.analyser.summary():null;
     if(!sum){
@@ -1047,6 +1141,13 @@ const App={
 
   updateHUD(res,t){
     const a=this.analyser, pill=$("pill-status"), hint=$("framing-hint");
+    /* Spoken status: you are across the room and cannot see the screen. */
+    const phase=!res.ok?"nolock":(res.calibrating?"calib":"track");
+    if(phase!==this.phase){
+      if(phase==="calib") Voice.say(LIFTS[this.lift].calib);
+      else if(phase==="track"&&this.phase==="calib") Voice.say("Ready");
+      this.phase=phase;
+    }
     if(!res.ok){
       pill.className="pill warn"; $("status-text").textContent="No lock";
       hint.classList.add("on");
@@ -1070,6 +1171,8 @@ const App={
       $("live-loss").textContent=Math.round(a.bestVel>0?clamp((a.bestVel-last.meanVel)/a.bestVel*100,0,100):0)+"%";
     }
     $("rep-count").classList.toggle("pulse",t-a.cueAt<450);
+
+    if(a.liveCue&&a.cueAt!==this.spokenAt){ this.spokenAt=a.cueAt; Voice.say(a.liveCue.speak); }
 
     const cue=$("cue");
     if(a.liveCue&&t-a.cueAt<2600){
@@ -1178,7 +1281,9 @@ function barChart(vals,labels,fmtV,lowFn){
 function renderReview(s,liftKey){
   const c=LIFTS[liftKey];
   $("rv-title").textContent=c.name;
-  $("rv-sub").textContent=`${s.reps.length} rep${s.reps.length>1?"s":""} · ${s.tut.toFixed(0)}s under tension`;
+  $("rv-sub").textContent=`${s.reps.length} rep${s.reps.length>1?"s":""}`
+    +(s.nRejects?` · ${s.nRejects} not counted`:"")
+    +` · ${s.tut.toFixed(0)}s under tension`;
 
   const romPcts=s.romPcts.map(v=>Math.round(v));
   const raw=App.analyser?App.analyser.trace:[];
