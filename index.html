@@ -169,7 +169,14 @@ h1{margin:0;text-wrap:balance;font-weight:800;letter-spacing:-.02em;}
   padding:max(12px,env(safe-area-inset-top)) max(12px,env(safe-area-inset-right)) 12px max(12px,env(safe-area-inset-left));
   background:linear-gradient(180deg,rgba(10,13,17,.85),rgba(10,13,17,0));pointer-events:none;
 }
-.hud-top .stopper{pointer-events:auto;}
+.hud-top .stopper,.hud-top .rezero{pointer-events:auto;}
+.rezero{
+  margin-left:auto;font-family:var(--mono);font-size:10.5px;letter-spacing:.11em;text-transform:uppercase;
+  padding:7px 13px;border-radius:100px;background:rgba(20,26,33,.82);
+  border:1px solid var(--hair);color:var(--muted);
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+}
+.rezero:active{background:rgba(240,168,40,.18);border-color:rgba(240,168,40,.5);color:var(--amber);}
 .pill{
   display:inline-flex;align-items:center;gap:7px;
   font-family:var(--mono);font-size:10.5px;font-weight:500;letter-spacing:.11em;text-transform:uppercase;
@@ -183,7 +190,7 @@ h1{margin:0;text-wrap:balance;font-weight:800;letter-spacing:-.02em;}
 .pill.warn{color:var(--amber);border-color:rgba(240,168,40,.35);}
 .pill.warn .dot{background:var(--amber);}
 .stopper{
-  margin-left:auto;font-family:var(--mono);font-size:10.5px;letter-spacing:.11em;text-transform:uppercase;
+  margin-left:8px;font-family:var(--mono);font-size:10.5px;letter-spacing:.11em;text-transform:uppercase;
   padding:7px 13px;border-radius:100px;background:rgba(229,72,77,.15);
   border:1px solid rgba(229,72,77,.5);color:var(--fault);
   backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
@@ -410,6 +417,7 @@ h1{margin:0;text-wrap:balance;font-weight:800;letter-spacing:-.02em;}
       <div class="hud-top">
         <span class="pill" id="pill-status"><span class="dot"></span><span id="status-text">Starting</span></span>
         <span class="pill"><span id="fps-text">— fps</span></span>
+        <button class="rezero" id="btn-rezero">Re-zero</button>
         <button class="stopper" id="btn-stop">End set</button>
       </div>
 
@@ -521,11 +529,21 @@ const Calib={
    start  — where a set begins: squat/bench start locked out at the top,
             a deadlift starts on the floor. This flips the rep cycle.
    rom0   — bootstrap range in torso lengths, used only until rep 1
-            measures the lifter's actual range.                       */
+            measures the lifter's actual range.
+   anchor — what height is measured against. Never the frame: walking
+            toward the camera changes the pixels-per-metre, so a frame
+            reference swings by several torso lengths on a walkout and
+            swamps the rep itself. Measure against a part of the lifter
+            that does not move during the lift instead.
+   anchor2— what to measure against when the first is out of shot. A
+            phone tilted up to catch the bar loses the feet long before
+            it loses the knees, and a knee only rises as far as the shin
+            angle takes it — a few centimetres against half a metre of
+            hip travel.                                               */
 const LIFTS={
   squat:{
     name:"Back Squat", short:"Squat", view:"Side on",
-    track:"hip", start:"top", rom0:0.95,
+    track:"hip", start:"top", rom0:0.95, anchor:"ank", anchor2:"kne",
     calib:"Stand tall and hold still",
     needs:[KP.lHip,KP.rHip,KP.lKne,KP.rKne,KP.lSho,KP.rSho],
     setup:"Set the phone <strong>on the floor or a bench, side on</strong>, about 8–10 ft away with the lens near hip height. Your whole body has to stay in frame at the top <em>and</em> in the hole.",
@@ -538,7 +556,7 @@ const LIFTS={
   },
   bench:{
     name:"Bench Press", short:"Bench", view:"Side on",
-    track:"wrist", start:"top", rom0:0.70,
+    track:"wrist", start:"top", rom0:0.70, anchor:"sho",
     calib:"Hold at lockout",
     needs:[KP.lSho,KP.rSho,KP.lElb,KP.rElb,KP.lWri,KP.rWri],
     setup:"Phone <strong>side on to the bench</strong>, 6–8 ft away, lens roughly at bench height. Frame from your hips to a foot above lockout.",
@@ -551,7 +569,7 @@ const LIFTS={
   },
   sumo:{
     name:"Sumo Deadlift", short:"Sumo DL", view:"Side on, low",
-    track:"wrist", start:"bottom", rom0:0.95,
+    track:"wrist", start:"bottom", rom0:0.95, anchor:"ank", anchor2:"kne",
     calib:"Hold your setup over the bar",
     needs:[KP.lHip,KP.rHip,KP.lKne,KP.rKne,KP.lSho,KP.rSho,KP.lWri,KP.rWri],
     setup:"Phone <strong>side on and low</strong> — around knee height — 8–10 ft away. The bar, your hips and your shoulders all need to be in frame.",
@@ -801,7 +819,16 @@ class Analyser{
     this.cfg=LIFTS[liftKey]; this.key=liftKey; this.H=frameH;
     this.sigF=new OneEuro(1.6,0.04);
     this.torsoF=new OneEuro(0.4,0.0);
+    this.ancF=new OneEuro(0.6,0.0);
+    /* Height and scale have to be read at the same instant. The heavily damped
+       torso is right for measurements taken at a standstill, but during a walk
+       it lags the body it is dividing, and the ratio spikes by more than a rep
+       is worth. Normalise against a scale that keeps up. */
+    this.torsoQ=new OneEuro(2.0,0.0); this.torsoS=NaN;
+    this.anchorY=null; this.anchored=false;
+    this.ancMode=null; this.ancT0=null; this.ancN=0; this.ancP=0; this.ancMiss=null;
     this.state="CALIB"; this.calMin=null; this.calMax=null; this.calRun=0; this.calT0=null;
+    this.settledS=null;
     this.topRef=null; this.botRef=null; this.torso=NaN;
     this.reps=[]; this.trace=[]; this.t0=null; this.cur=null;
     this.vel=0; this.prev=null; this.bestVel=0; this.maxRom=0;
@@ -822,6 +849,17 @@ class Analyser{
   }
 
   ready(kps){ return this.cfg.needs.every(i=>kps[i].s>MIN_SCORE); }
+
+  /* Side on, the far limb is behind the near one and the model is guessing at
+     it. Averaging the pair is better when both are seen; insisting on both
+     throws away a perfectly good reference when only one is. */
+  anchorPt(name,g,kps){
+    if(name==="sho") return g.shoOK?{ok:true,y:g.sho.y}:{ok:false};
+    const [l,r]=name==="ank"?[kps[KP.lAnk],kps[KP.rAnk]]:[kps[KP.lKne],kps[KP.rKne]];
+    if(l.s>MIN_SCORE&&r.s>MIN_SCORE) return {ok:true,y:(l.y+r.y)/2};
+    const b=l.s>=r.s?l:r;
+    return b.s>MIN_SCORE?{ok:true,y:b.y}:{ok:false};
+  }
 
   push(text){ if(text) this.speech.push(text); }
 
@@ -912,7 +950,10 @@ class Analyser{
 
   startRep(t,g,fromBottom){
     const p=this.cfg.track==="hip"?g.hip:g.wri;
-    this.cur={tStart:t,tStartRel:t-this.t0,sTop:this.topRef,
+    this.cur={tStart:t,tStartRel:t-this.t0,
+              sTop:this.prev?this.prev.s:this.topRef,      // observed, not the reference
+              sStart:this.prev?this.prev.s:this.topRef,
+              riseMax:0,
               sBot:this.prev?this.prev.s:this.botRef,
               tBot:fromBottom?t:null,tCon:null,minV:0,maxV:0,
               xMin:p.x,xMax:p.x,fromBottom:!!fromBottom,
@@ -979,10 +1020,53 @@ class Analyser{
       return {ok:false,reason:miss};
     }
     this.torso=this.torsoF.filter(g.torsoPx,t);
+    this.torsoS=this.torsoQ.filter(g.torsoPx,t);
     this.lastGoodT=t;
 
     const pt=this.cfg.track==="hip"?g.hip:g.wri;
-    const s=this.sigF.filter((this.H-pt.y)/this.torso,t);   // height, torso lengths, up is +
+
+    /* The reference height is measured against. Never the frame: it has to be
+       part of the lifter, or walking toward the camera moves it. */
+    const P=this.anchorPt(this.cfg.anchor,g,kps),
+          F=this.cfg.anchor2?this.anchorPt(this.cfg.anchor2,g,kps):{ok:false};
+
+    /* Standing at the rack puts more of the lifter in shot than standing under
+       the bar does, so feet that were there when tracking locked can be gone by
+       the time the first rep starts. Nothing has been measured yet, so there is
+       no reason to keep waiting on them — decide again. */
+    if(P.ok) this.ancMiss=null; else if(this.ancMiss==null) this.ancMiss=t;
+    if(this.ancMode==="P"&&!this.reps.length&&
+       this.ancMiss!=null&&t-this.ancMiss>2500){
+      this.ancMode=null; this.ancT0=null; this.ancN=0; this.ancP=0;
+    }
+
+    /* Which one to trust is decided once and then left alone — swapping
+       mid-set would step the signal by the length of a shin. Until it is
+       decided the fallback is used, because that is the one that is always
+       there, so choosing it costs nothing. */
+    if(this.ancMode==null){
+      if(this.ancT0==null) this.ancT0=t;
+      this.ancN++; if(P.ok) this.ancP++;
+      if(t-this.ancT0>600&&this.ancN>=8){
+        this.ancMode=(this.ancP/this.ancN>=0.6||!F.ok)?"P":"F";
+        this.anchored=true;
+        this.ancF=new OneEuro(0.6,0.0); this.sigF=new OneEuro(1.6,0.04);
+        this.torsoQ=new OneEuro(2.0,0.0); this.torsoS=g.torsoPx;
+        this.calMin=this.calMax=null; this.calT0=null; this.calRun=0; this.settledS=null;
+        this.trace.length=0;          // measured against something else entirely
+        if(!this.reps.length){ this.state="CALIB"; this.cur=null; }
+      }
+    }
+    /* Losing sight of the reference is not the same as it having moved. The
+       gap between ankle and knee opens and closes with the shin through every
+       rep, so standing one in for the other rescales the lift by the length of
+       that gap — 7% of range, enough to read as inconsistent depth. Feet do
+       not move during a set. Hold the last sight of them instead. */
+    const ay=this.ancMode==null?(F.ok?F.y:(P.ok?P.y:null))
+            :this.ancMode==="F"?(F.ok?F.y:null):(P.ok?P.y:null);
+    if(ay!=null) this.anchorY=this.ancF.filter(ay,t);
+    else if(this.anchorY==null) this.anchorY=this.H;
+    const s=this.sigF.filter((this.anchorY-pt.y)/this.torsoS,t);   // height above the reference
 
     if(this.t0==null) this.t0=t;
     if(this.prev){
@@ -993,6 +1077,7 @@ class Analyser{
     if(Math.abs(this.vel)>0.05) this.stillSince=null;
     else if(this.stillSince==null) this.stillSince=t;
     const stillFor=this.stillSince==null?0:t-this.stillSince;
+    if(stillFor>=300) this.settledS=s;
     this.trace.push({t:t-this.t0,s,v:this.vel});
     if(this.trace.length>5000) this.trace.shift();
 
@@ -1012,8 +1097,15 @@ class Analyser{
       this.calRun=rightWay?this.calRun+1:0;
       const moved=fromBottom?(s-this.calMin):(this.calMax-s);
       if(t-this.calT0>500&&this.calRun>=3&&moved>0.07){
-        if(fromBottom){ this.botRef=this.calMin; this.topRef=this.botRef+this.cfg.rom0; this.state="BOTTOM"; }
-        else          { this.topRef=this.calMax; this.botRef=this.topRef-this.cfg.rom0; this.state="TOP"; }
+        /* The extreme sample is whatever the walkout happened to touch. Where
+           the lifter last stood still is what they will return to. */
+        if(fromBottom){
+          this.botRef=this.settledS!=null?Math.min(this.settledS,this.calMin+0.10):this.calMin;
+          this.topRef=this.botRef+this.cfg.rom0; this.state="BOTTOM";
+        }else{
+          this.topRef=this.settledS!=null?Math.max(this.settledS,this.calMax-0.10):this.calMax;
+          this.botRef=this.topRef-this.cfg.rom0; this.state="TOP";
+        }
       }
       this.compTick(t,1,stillFor);
       return {ok:true,g,s,calibrating:true};
@@ -1026,6 +1118,13 @@ class Analyser{
     switch(this.state){
       case "TOP":
         if(p>0.85) this.topRef=0.94*this.topRef+0.06*Math.max(s,this.topRef-0.05);
+        /* Standing still and yet reading well below the top: the reference was
+           learned while the bar was still being walked out. Where the lifter is
+           standing now is the top, so move it here rather than wait for a rep
+           that can never close. */
+        else if(stillFor>700&&!this.reps.length){
+          this.topRef=s; this.botRef=s-this.cfg.rom0;
+        }
         if(p<0.80&&this.vel<-vEps){
           if(this.mode==="comp"&&this.key!=="sumo"&&this.comp.phase!=="ready") this.comp.early.start=true;
           this.state="DESC"; this.startRep(t,g,false);
@@ -1039,7 +1138,11 @@ class Analyser{
         if(this.vel>-vEps&&p<0.55){
           this.state="BOTTOM"; this.cur.tBot=t; this.captureBottom(g,kps);
         } else if(p>0.88&&this.cur.pMin>0.55){
-          this.rejectRep(t,"shallow",p);          // back at the top having never gone down
+          /* Turning around at 90% of the way up is a bailed rep and worth
+             saying. Dipping a fifth of the range is getting under the bar. */
+          if(this.cur.pMin>0.72) this.abandon(s); else this.rejectRep(t,"shallow",p);
+        } else if(stillFor>800&&this.cur.pMin>0.60&&!this.reps.length){
+          this.abandon(s);                        // shifted about on the walkout, then stopped
         }
         break;
 
@@ -1056,7 +1159,30 @@ class Analyser{
       case "ASC":{
         if(p>this.cur.pMax) this.cur.pMax=p;
         this.cur.minAscV=Math.min(this.cur.minAscV,this.vel);
-        if(this.cur.pMax>0.45&&p<0.30){ this.rejectRep(t,"sank",p); break; }  // got up, then sank
+
+        /* Whether a rep finished is a question about the lifter, not about the
+           calibrated range: they came back to where they started and stopped
+           going up. Measured against the rep's own excursion, so it still holds
+           when the reference band is wrong — and it is what puts the band
+           right again. Only for lifts that begin at the top, where "where you
+           started" is the lockout; a pull has no such landmark. */
+        if(!this.cur.fromBottom){
+          const drop=this.cur.sStart-this.cur.sBot, rise=s-this.cur.sBot;
+          if(rise>this.cur.riseMax) this.cur.riseMax=rise;
+          const real=drop>=(this.reps.length?0.60*this.maxRom:0.45*this.cfg.rom0);
+          if(!real&&!this.reps.length&&stillFor>800){ this.abandon(s); break; }
+          if(real&&rise>=0.90*drop&&this.vel<vEps){
+            const top=this.cur.sBot+drop;
+            this.topRef=Math.abs(this.topRef-top)>0.15?top:0.7*this.topRef+0.3*top;
+            this.botRef=Math.min(this.botRef,this.topRef-0.25);
+            this.finishRep(t); break;
+          }
+          /* Only a genuine bail from here: a rep that got most of the way home
+             has finished, whatever the reference says. */
+          if(this.cur.riseMax<0.75*drop&&this.cur.pMax>0.45&&p<0.30){
+            this.rejectRep(t,"sank",p); break;
+          }
+        } else if(this.cur.pMax>0.45&&p<0.30){ this.rejectRep(t,"sank",p); break; }
         this.cur.maxV=Math.max(this.cur.maxV,this.vel);
         const x=pt.x;
         this.cur.xMin=Math.min(this.cur.xMin,x); this.cur.xMax=Math.max(this.cur.xMax,x);
@@ -1087,7 +1213,11 @@ class Analyser{
     }
     this.compTick(t,p,stillFor);
     if(this.pending&&(t-this.t0)-this.pending.rep.tEnd>450) this.finalise();
-    if(this.cur&&t-this.cur.tStart>20000) this.rejectRep(t,"timeout",p);   // racked / walked away
+    /* Before the first rep there is no measured range, so setup movement can
+       open something that never closes. A lifter who has been motionless for a
+       second and a half is not grinding through one. */
+    if(this.cur&&!this.reps.length&&t-this.cur.tStart>8000&&stillFor>1500) this.abandon(s);
+    else if(this.cur&&t-this.cur.tStart>20000) this.rejectRep(t,"timeout",p);  // racked / walked away
     return {ok:true,g,s,p,depth:this.key==="squat"?this.depthNow(kps):null};
   }
 
@@ -1115,6 +1245,31 @@ class Analyser{
     if(g.shoOK&&g.hipOK) this.cur.leanBot=torsoLean(g.sho,g.hip);
     const dn=kps?this.depthNow(kps):null;
     if(dn){ this.cur.depth=dn.d; this.cur.depthConf=dn.conf; }
+  }
+
+  /* Standing where you are about to lift and asking it to start again is the
+     one instruction that always works, whatever it has decided so far. */
+  rezero(t){
+    this.state="CALIB"; this.calMin=this.calMax=null; this.calRun=0; this.calT0=null;
+    this.settledS=null; this.cur=null; this.pending=null; this.pendingStill=false;
+    this.topRef=null; this.botRef=null;
+    this.sigF=new OneEuro(1.6,0.04); this.ancF=new OneEuro(0.6,0.0);
+    this.torsoQ=new OneEuro(2.0,0.0); this.torsoF=new OneEuro(0.4,0.0);
+    this.trace.length=0;
+    this.anchored=false; this.anchorY=null; this.prev=null; this.vel=0;
+    this.ancMode=null; this.ancT0=null; this.ancN=0; this.ancP=0; this.ancMiss=null;
+    this.comp.phase="idle"; this.comp.cmdAt={}; this.comp.early={};
+    this.push("Ready.");
+    this.liveCue={sev:"good",label:"Re-zeroed",text:this.cfg.calib,speak:null};
+    this.cueAt=t!=null?t:(this.prev?this.prev.t:0);
+  }
+
+  /* Not every false start deserves an announcement. Movement during the
+     walkout opens a rep that was never one; drop it without comment and take
+     this settled position as the top, which is what it actually is. */
+  abandon(s){
+    this.cur=null; this.pendingStill=false; this.state="TOP";
+    if(isFinite(s)){ this.topRef=s; this.botRef=s-this.cfg.rom0; }
   }
 
   /* A rep that started and never finished. Saying why is the whole point —
@@ -1370,6 +1525,7 @@ const App={
     $("btn-review-close").onclick=()=>show("s-setup");
     $("btn-start").onclick=()=>this.start();
     $("btn-stop").onclick=()=>this.stop();
+    $("btn-rezero").onclick=()=>{ if(this.analyser) this.analyser.rezero(performance.now()); };
     Voice.init();
     const vseg=$("voice-seg");
     const paintVoice=()=>[...vseg.children].forEach(c=>
