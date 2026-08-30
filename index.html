@@ -285,6 +285,23 @@ h1{margin:0;text-wrap:balance;font-weight:800;letter-spacing:-.02em;}
 .hist-item .mid .d{display:block;font-family:var(--mono);font-size:10.5px;color:var(--faint);margin-top:3px;letter-spacing:.05em;}
 .hist-item .rr{text-align:right;font-family:var(--mono);font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;line-height:1.5;}
 .empty{text-align:center;padding:48px 24px;color:var(--faint);font-size:13.5px;line-height:1.6;}
+
+/* video, seek chips, competition */
+#rv-video{display:block;width:100%;max-height:62vh;border-radius:var(--r-sm);background:#000;}
+.chips{display:flex;flex-wrap:wrap;gap:6px;}
+.chip{font-family:var(--mono);font-size:11px;min-width:32px;padding:7px 9px;border:1px solid var(--hair);border-radius:var(--r-sm);color:var(--muted);transition:border-color .15s,color .15s;}
+.chip:hover{border-color:var(--amber);color:var(--amber);}
+.rt tr.seekable{cursor:pointer;}
+.rt tr.seekable:hover td{color:var(--ink);}
+.hist-item{width:100%;text-align:left;font:inherit;}
+.hist-item:disabled{opacity:.5;cursor:default;}
+.hist-item .sc.sc-sm{font-size:14px;}
+.tag{font-family:var(--mono);font-size:8.5px;letter-spacing:.09em;padding:2px 5px;border-radius:3px;background:var(--raised);color:var(--faint);vertical-align:middle;}
+.comp-note{background:var(--surface);border:1px solid var(--hair-soft);border-left:2px solid var(--amber);border-radius:var(--r-sm);padding:13px 14px;font-size:12.5px;color:var(--muted);line-height:1.55;}
+.comp-note b{display:block;color:var(--ink);font-weight:700;margin-bottom:5px;font-size:13px;}
+.comp-note em{color:var(--ink);font-style:normal;font-weight:600;}
+.cue.is-verdict{font-size:15px;}
+.cue.is-verdict .badge{font-size:11px;padding:5px 10px;}
 </style>
 </head>
 <body>
@@ -302,6 +319,22 @@ h1{margin:0;text-wrap:balance;font-weight:800;letter-spacing:-.02em;}
     </header>
     <div class="scroller">
       <div class="pad stack">
+
+        <div>
+          <div class="section-label"><span class="eyebrow">Mode</span><span class="rule"></span></div>
+          <div class="seg" id="mode-seg">
+            <button data-m="training" aria-pressed="true">Training</button>
+            <button data-m="comp" aria-pressed="false">Competition</button>
+          </div>
+          <div id="comp-note" class="comp-note" hidden style="margin-top:10px">
+            <b>Practice to the commands</b>
+            It calls the referee's commands from your position — <em>Squat / Rack</em>, <em>Start · Press · Rack</em>,
+            or <em>Down</em> — then gives a verdict on what the camera can actually see: depth, the pause on the chest,
+            lockout, downward movement, hitching, and moving before a command.
+            It cannot see locked knees at the start, your feet, your hips leaving the bench, or where the bar touches.
+            A training partner, not a referee.
+          </div>
+        </div>
 
         <div>
           <div class="section-label"><span class="eyebrow">Select lift</span><span class="rule"></span></div>
@@ -332,6 +365,15 @@ h1{margin:0;text-wrap:balance;font-weight:800;letter-spacing:-.02em;}
             <button data-v="off" aria-pressed="false">Voice off</button>
           </div>
           <p class="note" style="margin-top:8px">Calls each rep number out loud, and says why when a rep doesn't count.</p>
+        </div>
+
+        <div>
+          <div class="section-label"><span class="eyebrow">Recording</span><span class="rule"></span></div>
+          <div class="seg" id="record-seg">
+            <button data-r="on" aria-pressed="true">Save video</button>
+            <button data-r="off" aria-pressed="false">No video</button>
+          </div>
+          <p class="note" style="margin-top:8px">Keeps the set on this device so you can watch it back rep by rep. Around 2 MB per 10 seconds. The 20 most recent sets keep their clip; older ones keep the report and drop the video.</p>
         </div>
 
         <div>
@@ -368,7 +410,7 @@ h1{margin:0;text-wrap:balance;font-weight:800;letter-spacing:-.02em;}
         <div class="readout">
           <div>
             <div class="big num" id="rep-count">0</div>
-            <div class="biglab">Reps</div>
+            <div class="biglab" id="rep-label">Reps</div>
           </div>
           <div class="side">
             <div class="mini"><div class="mv num" id="live-rom">—</div><div class="mk">ROM</div></div>
@@ -512,6 +554,22 @@ function median(a){
   return s.length%2?s[m]:(s[m-1]+s[m])/2;
 }
 
+/* Concentric time rises across a hard set. That is fatigue, not sloppiness,
+   and scoring the raw spread punishes exactly the sets worth doing — badly
+   enough that a smoothly-slowing set used to score below an erratic one.
+   So fit the linear trend and measure only the scatter around it. */
+function trendResidualCV(y){
+  const n=y.length;
+  if(n<3) return 0;                                  // two points always fit a line
+  const mean=y.reduce((a,v)=>a+v,0)/n, xm=(n-1)/2;
+  let sxx=0,sxy=0;
+  for(let i=0;i<n;i++){ sxx+=(i-xm)**2; sxy+=(i-xm)*(y[i]-mean); }
+  const slope=sxx>0?sxy/sxx:0;
+  let ss=0;
+  for(let i=0;i<n;i++){ const fit=mean+slope*(i-xm); ss+=(y[i]-fit)**2; }
+  return mean>0?Math.sqrt(ss/n)/mean*100:0;
+}
+
 /* One Euro filter — removes jitter without the lag of a plain EMA. */
 class OneEuro{
   constructor(minCut=1.7,beta=0.05,dCut=1.0){
@@ -559,7 +617,91 @@ const Voice={
       speechSynthesis.speak(u);
     }catch(e){}
   },
+  /* Commands must all be heard, in order, so these queue instead of cutting in. */
+  enqueue(text){
+    if(!this.on||!text) return;
+    try{
+      if(!("speechSynthesis" in window)) return;
+      const u=new SpeechSynthesisUtterance(text);
+      u.rate=1.05; u.lang="en-US";
+      speechSynthesis.speak(u);
+    }catch(e){}
+  },
   stop(){ try{ if("speechSynthesis" in window) speechSynthesis.cancel(); }catch(e){} }
+};
+
+/* ============================================================
+   2c. STORE — sets live in IndexedDB: localStorage is a 5 MB
+   string bucket and a set now carries a video blob and a full
+   report. Every call is best-effort; the app works without it.
+   ============================================================ */
+const Store={
+  db:null, broken:false,
+  async open(){
+    if(this.db) return this.db;
+    if(this.broken) throw new Error("storage unavailable");
+    this.db=await new Promise((res,rej)=>{
+      let rq;
+      try{ rq=indexedDB.open("repscope",1); }catch(e){ rej(e); return; }
+      rq.onupgradeneeded=()=>{
+        const d=rq.result;
+        if(!d.objectStoreNames.contains("sets")) d.createObjectStore("sets",{keyPath:"id"});
+      };
+      rq.onsuccess=()=>res(rq.result);
+      rq.onerror=()=>rej(rq.error);
+      rq.onblocked=()=>rej(new Error("blocked"));
+    }).catch(e=>{ this.broken=true; throw e; });
+    return this.db;
+  },
+  async tx(mode,fn){
+    const db=await this.open();
+    return new Promise((res,rej)=>{
+      const t=db.transaction("sets",mode), s=t.objectStore("sets");
+      let rq; try{ rq=fn(s); }catch(e){ rej(e); return; }
+      t.oncomplete=()=>res(rq?rq.result:undefined);
+      t.onerror=()=>rej(t.error);
+      t.onabort=()=>rej(t.error);
+    });
+  },
+  put(rec){ return this.tx("readwrite",s=>s.put(rec)); },
+  get(id){ return this.tx("readonly",s=>s.get(id)); },
+  all(){ return this.tx("readonly",s=>s.getAll()); },
+  del(id){ return this.tx("readwrite",s=>s.delete(id)); },
+  clear(){ return this.tx("readwrite",s=>s.clear()); },
+
+  /* Video is the one thing here that grows without limit, so old clips are
+     dropped while their reports are kept. Silently filling the phone would be
+     a worse failure than losing a three-week-old clip. */
+  async prune(maxVideos=20,maxRows=200){
+    try{
+      const all=await this.all();
+      all.sort((a,b)=>b.ts-a.ts);
+      let vids=0;
+      for(let i=0;i<all.length;i++){
+        const r=all[i];
+        if(i>=maxRows){ await this.del(r.id); continue; }
+        if(r.video&&++vids>maxVideos){ r.video=null; r.videoType=null; await this.put(r); }
+      }
+    }catch(e){}
+  },
+
+  /* Sets saved before this version live in localStorage as bare summary rows.
+     Bring them across so the history list stays continuous; they have no
+     detail to open, and the list says so rather than pretending otherwise. */
+  async migrate(){
+    let old=[];
+    try{
+      if(localStorage.getItem("repscope.migrated")==="1") return;
+      old=JSON.parse(localStorage.getItem("repscope.sets.v1")||"[]");
+    }catch(e){ return; }
+    try{
+      for(const r of old){
+        await this.put({id:r.ts,ts:r.ts,lift:r.lift,mode:"training",legacy:true,
+                        reps:r.reps,quality:r.quality,velLoss:r.velLoss,rir:r.rir,tut:r.tut});
+      }
+      localStorage.setItem("repscope.migrated","1");
+    }catch(e){ /* nothing to lose — the old rows stay where they are */ }
+  }
 };
 
 /* ============================================================
@@ -618,7 +760,11 @@ const Model={
    lifts are actually performed.
    ============================================================ */
 class Analyser{
-  constructor(liftKey,frameH){
+  constructor(liftKey,frameH,mode){
+    this.mode=mode==="comp"?"comp":"training";
+    this.speech=[];                 // spoken output, drained by the app one per frame
+    this.stillSince=null;           // commands are given only once the bar is motionless
+    this.comp={phase:"idle",cmdAt:{},early:{},verdicts:[],nextArmAt:0};
     this.cfg=LIFTS[liftKey]; this.key=liftKey; this.H=frameH;
     this.sigF=new OneEuro(1.6,0.04);
     this.torsoF=new OneEuro(0.4,0.0);
@@ -644,6 +790,89 @@ class Analyser{
 
   ready(kps){ return this.cfg.needs.every(i=>kps[i].s>MIN_SCORE); }
 
+  push(text){ if(text) this.speech.push(text); }
+
+  /* ---- competition mode -------------------------------------------------
+     A head referee gives a command once the lifter is motionless and set,
+     and the attempt is judged on what happened between the commands. This
+     mirrors the IPF sequence: Squat/Rack, Start–Press–Rack, and Down on the
+     deadlift. Stillness, not a timer, is what triggers each command.        */
+  compTick(t,p,stillFor){
+    if(this.mode!=="comp"||this.state==="CALIB") return;
+    const C=this.comp, atTop=p>0.85;
+
+    if(this.key==="sumo"){
+      // No opening command on the deadlift: the lifter pulls when ready.
+      if(C.phase==="judged"){
+        if(C.cmdAt.down==null&&atTop&&stillFor>600){
+          C.cmdAt.down=t; this.push("Down."); this.speakVerdict(t);
+        } else if(C.cmdAt.down==null&&p<0.70){
+          C.early.down=true; this.amendVerdict("Lowered before the command"); this.speakVerdict(t);
+        }
+      }
+      return;
+    }
+
+    const opening=this.key==="squat"?"Squat.":"Start.";
+    if(C.phase==="idle"&&atTop&&stillFor>700&&t>=C.nextArmAt&&this.state==="TOP"){
+      C.cmdAt.open=t; C.phase="ready"; this.push(opening);
+    }
+    // Bench only: the press command comes when the bar is motionless on the chest.
+    if(this.key==="bench"&&this.state==="BOTTOM"&&C.phase==="ready"
+       &&C.cmdAt.press==null&&stillFor>350){
+      C.cmdAt.press=t; this.push("Press.");
+    }
+    if(C.phase==="judged"&&atTop&&stillFor>600&&C.cmdAt.rack==null){
+      C.cmdAt.rack=t; this.push("Rack."); this.speakVerdict(t);
+    }
+  }
+
+  /* Reasons a single side-on camera can actually stand behind. */
+  judgeAttempt(c){
+    const C=this.comp, bad=[];
+    if(this.key==="squat"){
+      if(C.early.start) bad.push("Started before the command");
+      if(c.depth==null) bad.push("Depth not visible");
+      else if(c.depth<-0.02) bad.push("Depth high");
+    }
+    if(this.key==="bench"){
+      if(C.early.start) bad.push("Lowered before the command");
+      if(C.early.press) bad.push("Pressed before the command");
+      else if(c.pauseMsRaw!=null&&c.pauseMsRaw<200) bad.push("No pause on the chest");
+      if(c.minAscV!=null&&c.minAscV<-0.09) bad.push("Downward movement during the press");
+      if(c.elbTop!=null&&c.elbTop<160) bad.push("No lockout");
+    }
+    if(this.key==="sumo"){
+      if(c.kneeTop!=null&&c.kneeTop<165) bad.push("Knees not locked");
+      if(c.hipTop!=null&&c.hipTop<160) bad.push("Hips not locked");
+      if(c.zeroX>=3) bad.push("Hitching");
+      if(c.minAscV!=null&&c.minAscV<-0.09) bad.push("Downward movement during the pull");
+    }
+    const v={i:this.reps.length,good:bad.length===0,reasons:bad};
+    C.verdicts.push(v);
+    C.phase="judged";
+    return v;
+  }
+
+  amendVerdict(reason){
+    const v=this.comp.verdicts[this.comp.verdicts.length-1];
+    if(v&&!v.reasons.includes(reason)){ v.reasons.push(reason); v.good=false; }
+  }
+
+  speakVerdict(t){
+    const C=this.comp, v=C.verdicts[C.verdicts.length-1];
+    if(!v||v.spoken) return;
+    v.spoken=true;
+    this.push(v.good?"Good lift." : "No lift. "+v.reasons[0]+".");
+    this.liveCue={sev:v.good?"good":"fault",
+                  label:v.good?"Good lift":"No lift",
+                  text:v.good?"All visible criteria met":v.reasons.join(" · "),
+                  speak:null, verdict:true};
+    this.cueAt=t;
+    C.phase="idle"; C.cmdAt={}; C.early={};
+    C.nextArmAt=t+3000;                   // time to re-rack and reset before the next call
+  }
+
   startRep(t,g,fromBottom){
     const p=this.cfg.track==="hip"?g.hip:g.wri;
     this.cur={tStart:t,tStartRel:t-this.t0,sTop:this.topRef,
@@ -651,7 +880,7 @@ class Analyser{
               tBot:fromBottom?t:null,tCon:null,minV:0,maxV:0,
               xMin:p.x,xMax:p.x,fromBottom:!!fromBottom,
               zeroX:0,prevVs:0,pMin:null,pMax:0,depth:null,leanBot:null,leanMid:null,
-              elbTop:null,kneeTop:null,hipFirst:null};
+              minAscV:0,elbTop:null,kneeTop:null,hipTop:null,hipFirst:null};
   }
 
   /* Threshold crossings tell us a rep happened; they are the wrong place to
@@ -724,6 +953,9 @@ class Analyser{
       if(dt>0.004) this.vel=0.65*this.vel+0.35*((s-this.prev.s)/dt);
     }
     this.prev={t,s};
+    if(Math.abs(this.vel)>0.05) this.stillSince=null;
+    else if(this.stillSince==null) this.stillSince=t;
+    const stillFor=this.stillSince==null?0:t-this.stillSince;
     this.trace.push({t:t-this.t0,s,v:this.vel});
     if(this.trace.length>5000) this.trace.shift();
 
@@ -746,7 +978,10 @@ class Analyser{
     switch(this.state){
       case "TOP":
         if(p>0.85) this.topRef=0.94*this.topRef+0.06*Math.max(s,this.topRef-0.05);
-        if(p<0.80&&this.vel<-vEps){ this.state="DESC"; this.startRep(t,g,false); }
+        if(p<0.80&&this.vel<-vEps){
+          if(this.mode==="comp"&&this.key!=="sumo"&&this.comp.phase!=="ready") this.comp.early.start=true;
+          this.state="DESC"; this.startRep(t,g,false);
+        }
         break;
 
       case "DESC":
@@ -764,6 +999,7 @@ class Analyser{
         if(!this.cur){ this.startRep(t,g,true); this.captureBottom(g); }
         if(s<this.cur.sBot){ this.cur.sBot=s; this.captureBottom(g); }
         if(this.vel>vEps){
+          if(this.mode==="comp"&&this.key==="bench"&&this.comp.cmdAt.press==null) this.comp.early.press=true;
           this.state="ASC"; this.cur.tCon=t;
           this.cur.hipAtLift=g.hip.y; this.cur.barAtLift=g.wri.y;
         }
@@ -771,6 +1007,7 @@ class Analyser{
 
       case "ASC":{
         if(p>this.cur.pMax) this.cur.pMax=p;
+        this.cur.minAscV=Math.min(this.cur.minAscV,this.vel);
         if(this.cur.pMax>0.45&&p<0.30){ this.rejectRep(t,"sank",p); break; }  // got up, then sank
         this.cur.maxV=Math.max(this.cur.maxV,this.vel);
         const x=pt.x;
@@ -794,11 +1031,13 @@ class Analyser{
         }
         if(this.key==="sumo"&&p>0.90&&this.cur.kneeTop==null&&g.hipOK&&g.kneOK&&g.ankOK){
           this.cur.kneeTop=angleAt(g.hip,g.kne,g.ank);
+          this.cur.hipTop=angleAt(g.sho,g.hip,g.kne);
         }
         if(p>0.88) this.finishRep(t);
         break;
       }
     }
+    this.compTick(t,p,stillFor);
     if(this.pending&&(t-this.t0)-this.pending.rep.tEnd>450) this.finalise();
     if(this.cur&&t-this.cur.tStart>20000) this.rejectRep(t,"timeout",p);   // racked / walked away
     return {ok:true,g,s,p};
@@ -824,6 +1063,11 @@ class Analyser{
     if(kind==="shallow"&&this.cur.pMin!=null)
       text=`Turned around at ${Math.round((1-this.cur.pMin)*100)}% of your usual depth`;
     this.rejects.push({t:t-this.t0,kind,text});
+    if(this.mode==="comp"){
+      this.comp.verdicts.push({i:this.reps.length,good:false,reasons:[R[0]]});
+      this.comp.phase="judged"; this.cur=null; this.speakVerdict(t);
+      this.state=p>0.6?"TOP":"BOTTOM"; return;
+    }
     this.liveCue={sev:"fault",label:"Not counted",text,speak:R[1]};
     this.cueAt=t;
     this.cur=null;
@@ -870,7 +1114,7 @@ class Analyser{
     }
 
     const rep={i:this.reps.length+1,eccMs,pauseMs,conMs,rom,meanVel,peakVel:c.maxV,
-               faults,tEnd:t-this.t0};
+               faults,tEnd:t-this.t0,tStart:c.tStartRel};
     this.reps.push(rep);
     this.maxRom=Math.max(this.maxRom,rom);
     this.bestVel=Math.max(this.bestVel,meanVel);
@@ -879,13 +1123,21 @@ class Analyser{
     this.botRef=0.7*this.botRef+0.3*(r?r.sMin:c.sBot);
     this.topRef=0.7*this.topRef+0.3*(r?r.sTop:c.sTop);
 
-    const bad=faults.find(f=>f[0]==="fault");
-    /* Spoken: the number, plus the fault in one word when there is one. The
-       phone is across the room, so anything longer arrives after the next rep. */
-    this.liveCue=bad
-      ?{sev:"fault",label:bad[1],text:bad[2],speak:`${rep.i}. ${bad[1]}.`}
-      :{sev:"good",label:"Clean",text:`Rep ${rep.i} — ${rom.toFixed(2)} ROM at ${meanVel.toFixed(2)}/s`,
-        speak:String(rep.i)};
+    if(this.mode==="comp"){
+      /* The verdict is decided now but announced with the closing command,
+         which is the order a lifter actually experiences it in. */
+      c.pauseMsRaw=pauseMs;
+      this.judgeAttempt(c);
+      this.liveCue={sev:"good",label:"Judging",text:"Hold still and wait for the command",speak:null};
+    } else {
+      const bad=faults.find(f=>f[0]==="fault");
+      /* Spoken: the number, plus the fault in one word when there is one. The
+         phone is across the room, so anything longer arrives after the next rep. */
+      this.liveCue=bad
+        ?{sev:"fault",label:bad[1],text:bad[2],speak:`${rep.i}. ${bad[1]}.`}
+        :{sev:"good",label:"Clean",text:`Rep ${rep.i} — ${rom.toFixed(2)} ROM at ${meanVel.toFixed(2)}/s`,
+          speak:String(rep.i)};
+    }
     /* The rep is counted the moment it is unambiguous, so the display keeps up.
        Its numbers are settled a beat later, once the bar has actually stopped
        at the top — otherwise the concentric is cut short by however much of the
@@ -909,24 +1161,47 @@ class Analyser{
     this.pending=null;
   }
 
+  /* The full trace is thousands of samples; the report only needs its shape,
+     and this gets stored on the device for every set. */
+  packTrace(){
+    const step=Math.max(1,Math.ceil(this.trace.length/700));
+    return this.trace
+      .filter((_,i)=>i%step===0||i===this.trace.length-1)
+      .map(x=>({t:Math.round(x.t),s:+x.s.toFixed(4)}));
+  }
+
+  compBits(){
+    return {comp:this.mode==="comp",verdicts:this.comp.verdicts,
+            goodLifts:this.comp.verdicts.filter(v=>v.good).length};
+  }
+
   summary(){
     this.finalise();                       // settle the last rep if the set ended on it
     const R=this.reps;
-    if(!R.length) return null;
+    if(!R.length){
+      /* In competition mode every attempt can be a no-lift and still deserves
+         a report — an empty rep list is not an empty session. */
+      if(this.mode==="comp"&&this.comp.verdicts.length)
+        return Object.assign({reps:[],quality:0,sRom:0,sTempo:0,sForm:0,velLoss:0,
+          rir:"—",rirNote:"",maxRom:0,bestVel:0,romPcts:[],tempoCV:0,lift:this.key,
+          faults:[],nRejects:this.rejects.length,tut:0,trace:this.packTrace()},this.compBits());
+      return null;
+    }
     const roms=R.map(r=>r.rom), vels=R.map(r=>r.meanVel), cons=R.map(r=>r.conMs);
     const maxRom=Math.max(...roms), bestVel=Math.max(...vels), lastVel=vels[vels.length-1];
     const velLoss=bestVel>0?clamp((bestVel-lastVel)/bestVel*100,0,100):0;
     const romPcts=roms.map(r=>maxRom>0?r/maxRom*100:100);
     const romDev=romPcts.reduce((a,v)=>a+Math.abs(100-v),0)/romPcts.length;
-    const meanCon=cons.reduce((a,v)=>a+v,0)/cons.length;
-    const conSd=Math.sqrt(cons.reduce((a,v)=>a+(v-meanCon)**2,0)/cons.length);
-    const tempoCV=meanCon>0?conSd/meanCon*100:0;
+    const tempoCV=trendResidualCV(cons);   // scatter about the fatigue trend, not the spread
     const faultReps=R.filter(r=>r.faults.some(f=>f[0]==="fault")).length;
 
     /* Quality scores execution only. Effort is reported separately — a hard
        set is not a badly executed one, and conflating them punishes training. */
     const sRom=clamp(100-romDev*2.2,0,100);
-    const sTempo=R.length<2?100:clamp(100-tempoCV*1.6,0,100);
+    /* The 3.5% dead zone absorbs ordinary rep-to-rep variation and timing
+       noise; past that, scatter costs 4 points per point of CV. The dead zone
+       is principled, the slope is my judgement. */
+    const sTempo=R.length<3?100:clamp(100-Math.max(0,tempoCV-3.5)*4,0,100);
     const sForm=clamp(100-(faultReps/R.length)*100,0,100);
     const quality=Math.round(sRom*0.30+sTempo*0.20+sForm*0.50);
 
@@ -952,10 +1227,10 @@ class Analyser{
       rbag.get(r.kind).n++;
     });
 
-    return {reps:R,quality,sRom,sTempo,sForm,velLoss,rir,rirNote,maxRom,bestVel,
-            romPcts,tempoCV,lift:this.key,
+    return Object.assign({reps:R,quality,sRom,sTempo,sForm,velLoss,rir,rirNote,maxRom,bestVel,
+            romPcts,tempoCV,lift:this.key,trace:this.packTrace(),
             faults:[...rbag.values()].concat(faults), nRejects:this.rejects.length,
-            tut:R.reduce((a,r)=>a+(r.eccMs||0)+(r.pauseMs||0)+r.conMs,0)/1000};
+            tut:R.reduce((a,r)=>a+(r.eccMs||0)+(r.pauseMs||0)+r.conMs,0)/1000},this.compBits());
   }
 }
 
@@ -966,7 +1241,41 @@ const App={
   lift:"squat", stream:null, running:false, analyser:null,
   facing:"environment", fps:0, frames:0, fpsT:0, scopeBox:null,
   wakeLock:null, installPrompt:null, phase:null, spokenAt:0,
+  mode:"training", recordOn:true, rec:null, chunks:[], recStart:0,
+  lastRec:null, videoUrl:null,
   proc:document.createElement("canvas"),
+
+  /* ---- set recording -------------------------------------------------
+     The clip is the evidence behind the numbers: a depth call you disagree
+     with is settled by watching the rep, not by trusting the score. */
+  pickRecType(){
+    for(const t of ["video/webm;codecs=vp9","video/webm;codecs=vp8","video/webm","video/mp4"]){
+      try{ if(window.MediaRecorder&&MediaRecorder.isTypeSupported(t)) return t; }catch(e){}
+    }
+    return null;
+  },
+  startRecording(){
+    this.chunks=[]; this.rec=null; this.recStart=0;
+    if(!this.recordOn||!window.MediaRecorder||!this.stream) return;
+    const type=this.pickRecType(); if(!type) return;
+    try{
+      this.rec=new MediaRecorder(this.stream,{mimeType:type,videoBitsPerSecond:1800000});
+      this.rec.ondataavailable=e=>{ if(e.data&&e.data.size) this.chunks.push(e.data); };
+      this.rec.onerror=()=>{ this.rec=null; };
+      this.rec.start(1000);
+      this.recStart=performance.now();
+    }catch(e){ this.rec=null; }
+  },
+  stopRecording(){
+    return new Promise(res=>{
+      const r=this.rec;
+      if(!r||r.state==="inactive"){ res(null); return; }
+      const finish=()=>{ try{ res(new Blob(this.chunks,{type:r.mimeType||"video/webm"})); }catch(e){ res(null); } };
+      r.onstop=finish;
+      try{ r.stop(); }catch(e){ finish(); }
+      setTimeout(()=>res(null),4000);   // never let a stuck recorder hold up the report
+    });
+  },
 
   /* A phone propped against the rack gets no touch input, so the screen dims
      and locks part-way through the set and the camera stops with it. */
@@ -999,6 +1308,29 @@ const App={
       Voice.set(b.dataset.v==="on"); paintVoice();
       if(Voice.on){ Voice.prime(); Voice.say("Voice on"); }   // also primes inside the tap
     });
+    /* Mode and recording are remembered, so the app comes up the way it was
+       last left — you set this once in the car park, not every set. */
+    try{ this.mode=localStorage.getItem("repscope.mode")==="comp"?"comp":"training"; }catch(e){}
+    try{ this.recordOn=localStorage.getItem("repscope.record")!=="off"; }catch(e){}
+    const paintSeg=(id,key,val)=>[...$(id).children].forEach(c=>
+      c.setAttribute("aria-pressed",String(c.dataset[key]===val)));
+    const paintMode=()=>{ paintSeg("mode-seg","m",this.mode); $("comp-note").hidden=this.mode!=="comp"; };
+    const paintRec=()=>paintSeg("record-seg","r",this.recordOn?"on":"off");
+    paintMode(); paintRec();
+    $("mode-seg").addEventListener("click",e=>{
+      const b=e.target.closest("button[data-m]"); if(!b) return;
+      this.mode=b.dataset.m;
+      try{ localStorage.setItem("repscope.mode",this.mode); }catch(e){}
+      paintMode();
+    });
+    $("record-seg").addEventListener("click",e=>{
+      const b=e.target.closest("button[data-r]"); if(!b) return;
+      this.recordOn=b.dataset.r==="on";
+      try{ localStorage.setItem("repscope.record",this.recordOn?"on":"off"); }catch(e){}
+      paintRec();
+    });
+    Store.migrate().catch(()=>{});
+
     $("facing-seg").addEventListener("click",e=>{
       const b=e.target.closest("button[data-f]"); if(!b) return;
       this.facing=b.dataset.f;
@@ -1083,7 +1415,8 @@ const App={
     this.lockScreen();
     Voice.prime();
     this.phase=null; this.spokenAt=0;
-    this.analyser=new Analyser(this.lift,v.videoHeight||720);
+    this.analyser=new Analyser(this.lift,v.videoHeight||720,this.mode);
+    this.startRecording();
     this.running=true; this.frames=0; this.fpsT=performance.now(); this.scopeBox=null;
     $("rep-count").textContent="0";
     ["live-rom","live-vel","live-loss"].forEach(i=>$(i).textContent="—");
@@ -1091,21 +1424,35 @@ const App={
     this.loop();
   },
 
-  stop(){
+  async stop(){
     if(!this.running) return;
     this.running=false;
     this.releaseScreen();
     Voice.stop();
+    const blob=await this.stopRecording();          // must finish before the tracks die
     if(this.stream){this.stream.getTracks().forEach(t=>t.stop());this.stream=null;}
-    const sum=this.analyser?this.analyser.summary():null;
+
+    const a=this.analyser, sum=a?a.summary():null;
     if(!sum){
       $("start-note").className="note";
       $("start-note").textContent="No complete reps were detected in that set. Check the framing guide above — the camera needs to see your shoulders and hips through the whole rep.";
       show("s-setup"); return;
     }
-    renderReview(sum,this.lift);
-    saveSet(sum,this.lift);
+    const now=Date.now();
+    const rec={
+      id:now, ts:now, lift:this.lift, mode:this.mode,
+      reps:sum.reps.length, quality:sum.quality, velLoss:Math.round(sum.velLoss),
+      rir:sum.rir, tut:Math.round(sum.tut), nRejects:sum.nRejects,
+      comp:!!sum.comp, goodLifts:sum.goodLifts||0, attempts:(sum.verdicts||[]).length,
+      summary:sum, video:blob||null, videoType:blob?blob.type:null,
+      /* the analyser starts its clock on the first tracked frame, which is
+         later than the recording — without this the seeks land in the wrong place */
+      videoOffset:(blob&&a.t0&&this.recStart)?(a.t0-this.recStart)/1000:0
+    };
+    this.lastRec=rec;
+    renderReview(rec);
     show("s-review");
+    Store.put(rec).then(()=>Store.prune()).catch(()=>{ /* blocked or full — the report is still on screen */ });
   },
 
   loop(){
@@ -1163,7 +1510,14 @@ const App={
     }
     pill.className="pill ok"; $("status-text").textContent="Tracking";
 
-    $("rep-count").textContent=String(a.reps.length);
+    if(this.mode==="comp"){
+      const V=a.comp.verdicts;
+      $("rep-count").textContent=String(V.filter(x=>x.good).length);
+      $("rep-label").textContent=V.length?`Good of ${V.length}`:"Good lifts";
+    } else {
+      $("rep-count").textContent=String(a.reps.length);
+      $("rep-label").textContent="Reps";
+    }
     const last=a.reps[a.reps.length-1];
     if(last){
       $("live-rom").textContent=last.rom.toFixed(2);
@@ -1172,11 +1526,19 @@ const App={
     }
     $("rep-count").classList.toggle("pulse",t-a.cueAt<450);
 
-    if(a.liveCue&&a.cueAt!==this.spokenAt){ this.spokenAt=a.cueAt; Voice.say(a.liveCue.speak); }
+    /* Commands and verdicts queue so none is cut off. The training rep number
+       interrupts instead, because a stale count is worse than a missed one. */
+    if(a.speech.length) Voice.enqueue(a.speech.shift());
+    if(a.liveCue&&a.cueAt!==this.spokenAt){
+      this.spokenAt=a.cueAt;
+      if(a.liveCue.speak) Voice.say(a.liveCue.speak);
+    }
 
     const cue=$("cue");
-    if(a.liveCue&&t-a.cueAt<2600){
-      cue.className="cue on "+(a.liveCue.sev==="fault"?"is-fault":"is-good");
+    const cueMs=(a.liveCue&&a.liveCue.verdict)?5200:2600;   // a verdict is worth reading
+    if(a.liveCue&&t-a.cueAt<cueMs){
+      cue.className="cue on "+(a.liveCue.sev==="fault"?"is-fault":"is-good")
+                   +(a.liveCue.verdict?" is-verdict":"");
       $("cue-badge").textContent=a.liveCue.label;
       $("cue-text").textContent=a.liveCue.text;
     } else cue.className="cue";
@@ -1278,17 +1640,18 @@ function barChart(vals,labels,fmtV,lowFn){
     <div class="blabs">${labels.map(l=>`<span>${l}</span>`).join("")}</div>`;
 }
 
-function renderReview(s,liftKey){
-  const c=LIFTS[liftKey];
-  $("rv-title").textContent=c.name;
-  $("rv-sub").textContent=`${s.reps.length} rep${s.reps.length>1?"s":""}`
-    +(s.nRejects?` · ${s.nRejects} not counted`:"")
-    +` · ${s.tut.toFixed(0)}s under tension`;
+function renderReview(rec){
+  const s=rec.summary, liftKey=rec.lift, c=LIFTS[liftKey]||{name:liftKey,track:"hip"};
+  $("rv-title").textContent=(s.comp?"Comp · ":"")+c.name;
+  $("rv-sub").textContent=(s.comp&&s.verdicts.length
+      ? `${s.goodLifts}/${s.verdicts.length} good · `
+      : `${s.reps.length} rep${s.reps.length===1?"":"s"} · `)
+    +(s.nRejects?`${s.nRejects} not counted · `:"")
+    +new Date(rec.ts).toLocaleDateString(undefined,{month:"short",day:"numeric"});
 
-  const romPcts=s.romPcts.map(v=>Math.round(v));
-  const raw=App.analyser?App.analyser.trace:[];
-  const step=Math.max(1,Math.ceil(raw.length/700));      // keep the SVG path sane
-  const trace=step>1?raw.filter((_,i)=>i%step===0||i===raw.length-1):raw;
+  const romPcts=(s.romPcts||[]).map(v=>Math.round(v));
+  const trace=s.trace||[];               // already packed down when the set was saved
+  const hasVideo=!!rec.video;
   let tracePath="",markers="";
   if(trace.length>4){
     let lo=Infinity,hi=-Infinity;
@@ -1305,6 +1668,37 @@ function renderReview(s,liftKey){
   }
 
   $("review-body").innerHTML=`
+    ${hasVideo?`
+    <div class="chart-card">
+      <video id="rv-video" playsinline controls preload="metadata"></video>
+      <div class="chart-head" style="margin:13px 0 9px">
+        <div class="t">Watch it back</div>
+        <div class="s">Tap a rep to jump straight to it — the table rows seek too.</div>
+      </div>
+      <div class="chips">${(s.reps||[]).map(r=>
+        `<button class="chip" data-seek="${((r.tStart!=null?r.tStart:r.tEnd)/1000).toFixed(2)}">${r.i}</button>`).join("")}
+      </div>
+    </div>`:""}
+
+    ${s.comp&&s.verdicts&&s.verdicts.length?`
+    <div class="hero-score">
+      <div class="hero-half">
+        <div class="k">Good lifts</div>
+        <div class="v" style="color:${s.goodLifts===s.verdicts.length?"var(--good)":"var(--fault)"}">${s.goodLifts}<span class="u">/${s.verdicts.length}</span></div>
+        <div class="d">Judged only on what a side-on camera can actually see.</div>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-label"><span class="eyebrow">Attempts</span><span class="rule"></span></div>
+      <div class="faults">${s.verdicts.map((v,i)=>`
+        <div class="fault-item sev-${v.good?"good":"fault"}">
+          <span class="cnt">${i+1}</span>
+          <span class="txt"><b>${v.good?"Good lift":"No lift"}</b><span>${v.good?"All visible criteria met":v.reasons.join(" · ")}</span></span>
+        </div>`).join("")}</div>
+    </div>`:""}
+
+    ${s.reps.length?`
     <div class="hero-score">
       <div class="hero-half">
         <div class="k">Execution quality</div>
@@ -1322,7 +1716,7 @@ function renderReview(s,liftKey){
       <div class="stat"><div class="k">Reps</div><div class="v">${s.reps.length}</div></div>
       <div class="stat"><div class="k">Speed loss</div><div class="v">${Math.round(s.velLoss)}<small>%</small></div></div>
       <div class="stat"><div class="k">Under tension</div><div class="v">${s.tut.toFixed(0)}<small>s</small></div></div>
-    </div>
+    </div>`:""}
 
     ${trace.length>4?`
     <div class="chart-card">
@@ -1368,7 +1762,7 @@ function renderReview(s,liftKey){
         <thead><tr><th>Rep</th><th>Ecc</th><th>Pause</th><th>Con</th><th>ROM</th><th>Speed</th></tr></thead>
         <tbody>${s.reps.map((r,i)=>{
           const bad=r.faults.some(f=>f[0]==="fault");
-          return `<tr>
+          return `<tr data-seek="${((r.tStart!=null?r.tStart:r.tEnd)/1000).toFixed(2)}" class="${hasVideo?"seekable":""}">
             <td class="lead">${r.i}${bad?' <span style="color:var(--fault)">•</span>':""}</td>
             <td>${r.eccMs==null?"—":(r.eccMs/1000).toFixed(2)+"s"}</td>
             <td>${r.pauseMs==null?"—":(r.pauseMs/1000).toFixed(2)+"s"}</td>
@@ -1384,7 +1778,7 @@ function renderReview(s,liftKey){
       <div class="stat-row">
         <div class="stat"><div class="k">Form</div><div class="v" style="color:${scoreColor(s.sForm)}">${Math.round(s.sForm)}</div></div>
         <div class="stat"><div class="k">Depth consistency</div><div class="v" style="color:${scoreColor(s.sRom)}">${Math.round(s.sRom)}</div></div>
-        <div class="stat"><div class="k">Tempo</div><div class="v" style="color:${scoreColor(s.sTempo)}">${Math.round(s.sTempo)}</div></div>
+        <div class="stat"><div class="k">Tempo scatter</div><div class="v" style="color:${scoreColor(s.sTempo)}">${Math.round(s.sTempo)}</div></div>
       </div>
     </div>
 
@@ -1392,12 +1786,45 @@ function renderReview(s,liftKey){
       Distances are in <strong>torso lengths</strong> — shoulder to hip — so they stay comparable
       whatever distance the phone sits at. Reps-left is inferred from how far bar speed fell across
       the set: a good guide on compound lifts, and a rough one on sets under three reps.
+      Tempo scores how much your rep times scatter around their own trend, so slowing down
+      as you fatigue costs nothing — only inconsistency does.
     </p>
 
     <div class="btn-row">
       <button class="primary-btn" id="btn-again">Another set</button>
       <button class="sec-btn" id="btn-to-history">History</button>
-    </div>`;
+    </div>
+    ${rec.id?`<button class="sec-btn" id="btn-del" style="width:100%;color:var(--fault);border-color:rgba(229,72,77,.4)">Delete this set</button>`:""}`;
+
+  /* Hook up the clip and every seek control the report just rendered. */
+  const vid=$("rv-video");
+  if(vid&&rec.video){
+    if(App.videoUrl){ try{ URL.revokeObjectURL(App.videoUrl); }catch(e){} }
+    try{ App.videoUrl=URL.createObjectURL(rec.video); vid.src=App.videoUrl; }catch(e){}
+  }
+  const off=rec.videoOffset||0;
+  $("review-body").querySelectorAll("[data-seek]").forEach(el=>{
+    el.onclick=()=>{
+      if(!vid) return;
+      const at=parseFloat(el.dataset.seek);
+      if(!isFinite(at)) return;
+      try{ vid.currentTime=Math.max(0,off+at-0.4); vid.play().catch(()=>{}); }catch(e){}
+      vid.scrollIntoView({block:"nearest",behavior:"smooth"});
+    };
+  });
+
+  /* Two taps to delete: a stray tap on a set you wanted to keep is not
+     recoverable, and a modal for this would be worse. */
+  const del=$("btn-del");
+  if(del) del.onclick=async()=>{
+    if(del.dataset.armed!=="1"){
+      del.dataset.armed="1"; del.textContent="Tap again to delete";
+      setTimeout(()=>{ if(del.dataset.armed==="1"){ del.dataset.armed=""; del.textContent="Delete this set"; } },4000);
+      return;
+    }
+    try{ await Store.del(rec.id); }catch(e){}
+    renderHistoryInto(); show("s-history");
+  };
 
   $("btn-again").onclick=()=>App.start();
   $("btn-to-history").onclick=()=>{renderHistoryInto();show("s-history");};
@@ -1406,35 +1833,62 @@ function renderReview(s,liftKey){
 /* ============================================================
    8. HISTORY — per device; storage can legitimately be unavailable
    ============================================================ */
-const LS_KEY="repscope.sets.v1";
-function loadSets(){ try{ return JSON.parse(localStorage.getItem(LS_KEY)||"[]"); }catch(e){ return []; } }
-function saveSet(s,liftKey){
-  try{
-    const all=loadSets();
-    all.unshift({ts:Date.now(),lift:liftKey,reps:s.reps.length,quality:s.quality,
-                 velLoss:Math.round(s.velLoss),rir:s.rir,tut:Math.round(s.tut)});
-    localStorage.setItem(LS_KEY,JSON.stringify(all.slice(0,60)));
-  }catch(e){ /* private mode, quota, blocked storage — history is a convenience */ }
+function fmtBytes(b){
+  if(!b) return "";
+  return b>=1e6?(b/1e6).toFixed(1)+" MB":Math.round(b/1e3)+" kB";
 }
-function renderHistoryInto(){
-  const all=loadSets(), body=$("history-body");
+
+async function renderHistoryInto(){
+  const body=$("history-body");
+  body.innerHTML='<div class="empty">Loading…</div>';
+  let all=[];
+  try{ await Store.migrate(); all=await Store.all(); }
+  catch(e){
+    $("hist-sub").textContent="Unavailable";
+    body.innerHTML='<div class="empty">History is unavailable — this browser is blocking local storage for the app.</div>';
+    return;
+  }
+  all.sort((a,b)=>b.ts-a.ts);
   if(!all.length){
     body.innerHTML='<div class="empty">No sets saved yet.<br>Finish a set and it will appear here.</div>';
     $("hist-sub").textContent="Saved on this device"; return;
   }
-  $("hist-sub").textContent=`${all.length} set${all.length>1?"s":""} on this device`;
+  const bytes=all.reduce((n,r)=>n+((r.video&&r.video.size)||0),0);
+  $("hist-sub").textContent=`${all.length} set${all.length===1?"":"s"}`+(bytes?` · ${fmtBytes(bytes)} of video`:"");
+
   body.innerHTML=`<div class="stack" style="gap:8px">${all.map(r=>{
     const d=new Date(r.ts);
     const when=d.toLocaleDateString(undefined,{month:"short",day:"numeric"})+" · "+
                d.toLocaleTimeString(undefined,{hour:"numeric",minute:"2-digit"});
-    return `<div class="hist-item">
-      <span class="sc" style="color:${scoreColor(r.quality)}">${r.quality}</span>
-      <span class="mid"><span class="l">${LIFTS[r.lift]?LIFTS[r.lift].short:r.lift}</span><span class="d">${when}</span></span>
-      <span class="rr">${r.reps} reps<br>${r.velLoss}% loss</span></div>`;
+    const openable=!!r.summary;
+    const score=r.comp
+      ? `<span class="sc sc-sm" style="color:${r.attempts&&r.goodLifts===r.attempts?"var(--good)":"var(--fault)"}">${r.goodLifts}/${r.attempts}</span>`
+      : `<span class="sc" style="color:${scoreColor(r.quality)}">${r.quality}</span>`;
+    const right=r.comp?`${r.attempts} attempt${r.attempts===1?"":"s"}`:`${r.reps} reps<br>${r.velLoss}% loss`;
+    return `<button class="hist-item" data-open="${r.id}" ${openable?"":"disabled"}>
+      ${score}
+      <span class="mid">
+        <span class="l">${LIFTS[r.lift]?LIFTS[r.lift].short:r.lift}${r.comp?' <span class="tag">COMP</span>':""}${r.video?' <span class="tag">VIDEO</span>':""}</span>
+        <span class="d">${when}${openable?"":" · no detail saved"}</span>
+      </span>
+      <span class="rr">${right}</span></button>`;
   }).join("")}</div>
   <button class="sec-btn" id="btn-clear" style="width:100%">Clear history</button>`;
+
+  body.querySelectorAll("[data-open]").forEach(el=>{
+    el.onclick=async()=>{
+      try{
+        const rec=await Store.get(Number(el.dataset.open));
+        if(rec&&rec.summary){ App.lastRec=rec; renderReview(rec); show("s-review"); }
+      }catch(e){}
+    };
+  });
   const cl=$("btn-clear");
-  if(cl) cl.onclick=()=>{ try{localStorage.removeItem(LS_KEY);}catch(e){} renderHistoryInto(); };
+  if(cl) cl.onclick=async()=>{
+    try{ await Store.clear(); }catch(e){}
+    try{ localStorage.removeItem("repscope.sets.v1"); }catch(e){}
+    renderHistoryInto();
+  };
 }
 
 /* ============================================================
