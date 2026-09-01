@@ -120,6 +120,16 @@ h1{margin:0;text-wrap:balance;font-weight:800;letter-spacing:-.02em;}
 .lift[aria-pressed="true"] .chk{border-color:var(--amber);background:radial-gradient(circle,var(--amber) 0 4px,transparent 4px);}
 
 .setup-card{background:var(--surface);border:1px solid var(--hair-soft);border-radius:var(--r-md);overflow:hidden;}
+.dtable{width:100%;border-collapse:collapse;margin-top:4px;}
+.dtable th{
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.11em;text-transform:uppercase;
+  color:var(--faint);text-align:left;font-weight:500;padding:0 8px 7px 0;
+}
+.dtable th:not(:nth-child(-n+2)){text-align:right;padding-right:0;}
+.dtable td{padding:8px 8px 8px 0;border-top:1px solid var(--hair-soft);font-size:13px;vertical-align:top;}
+.dtable td.dk{color:var(--muted);white-space:nowrap;}
+.dtable td.dv{color:var(--ink);}
+.dtable td.dn{font-family:var(--mono);font-size:12px;color:var(--ink);text-align:right;white-space:nowrap;padding-right:0;}
 .viewnote{
   display:flex;gap:10px;align-items:flex-start;
   background:rgba(240,168,40,.07);border:1px solid rgba(240,168,40,.22);
@@ -520,18 +530,27 @@ const MIN_SCORE=0.32;
    population averages, which is why Calib below exists. */
 const CREASE_K=0.09;      // hip crease sits below the hip joint centre
 const KNEETOP_K=0.06;     // top of the knee sits above the knee joint centre
-const HIP_CREASE_K=CREASE_K+KNEETOP_K;
+/* The anatomy above is not the whole gap. A pose model does not annotate a hip
+   where a judge looks: its hip keypoint sits up toward the middle of the pelvis
+   rather than at the crease, which makes every squat read shallower than it
+   was. Measured against a set of squats their lifter said would all have passed
+   on a platform, the shortfall was 0.17 femur lengths — about 7cm, far more
+   than crease-and-patella geometry can account for. It is a property of the
+   model rather than of the lifter, so it is corrected here for everyone, and
+   the per-lifter calibration in the report is still there for what is left. */
+const MODEL_HIP_BIAS=0.17;
+const HIP_CREASE_K=CREASE_K+KNEETOP_K+MODEL_HIP_BIAS;
 
 /* One lifter's own anatomy beats a population average. This lets a rep the
    lifter knows was legal set their personal reference. */
 const Calib={
   depth:0,
   load(){
-    try{ const v=parseFloat(localStorage.getItem("repscope.depthOffset"));
+    try{ const v=parseFloat(localStorage.getItem("repscope.depthOffset.v2"));
          if(isFinite(v)) this.depth=v; }catch(e){}
   },
-  set(v){ this.depth=v; try{ localStorage.setItem("repscope.depthOffset",String(v)); }catch(e){} },
-  reset(){ this.depth=0; try{ localStorage.removeItem("repscope.depthOffset"); }catch(e){} },
+  set(v){ this.depth=v; try{ localStorage.setItem("repscope.depthOffset.v2",String(v)); }catch(e){} },
+  reset(){ this.depth=0; try{ localStorage.removeItem("repscope.depthOffset.v2"); }catch(e){} },
   get on(){ return Math.abs(this.depth)>1e-6; }
 };
 
@@ -539,13 +558,26 @@ const Calib={
    track  — the point whose height is the primary signal
    start  — where a set begins: squat/bench start locked out at the top,
             a deadlift starts on the floor. This flips the rep cycle.
-   rom0   — bootstrap range in torso lengths, used only until rep 1
+   rom0   — bootstrap range in the lift's own scale, used only until rep 1
             measures the lifter's actual range.
    anchor — what height is measured against. Never the frame: walking
             toward the camera changes the pixels-per-metre, so a frame
             reference swings by several torso lengths on a walkout and
             swamps the rep itself. Measure against a part of the lifter
             that does not move during the lift instead.
+   scale  — the length everything is expressed in. Torso — shoulder to hip —
+            was the obvious choice and is the wrong one for a lift filmed from
+            the front: leaning at the bottom foreshortens it toward the lens,
+            and on real footage it doubles and halves inside a single rep,
+            which is a ruler that changes length as you measure with it.
+            The answer is not a better length to measure every frame — it is
+            to stop measuring one every frame. Standing hip height, taken once
+            while the lifter is set and still and then held, is stable by
+            construction: nothing it depends on moves during the set. Heights
+            then read as a fraction of standing hip height, which is 1.0 stood
+            up and about 0.42 at parallel — and that figure comes out the same
+            on a side-on rig and a head-on phone, which is the test that
+            matters. Bench keeps the torso: the lifter is lying still.
    anchor2— what to measure against when the first is out of shot. A
             phone tilted up to catch the bar loses the feet long before
             it loses the knees, and a knee only rises as far as the shin
@@ -554,7 +586,7 @@ const Calib={
 const LIFTS={
   squat:{
     name:"Back Squat", short:"Squat", view:"Head on",
-    track:"hip", start:"top", rom0:0.95, anchor:"ank", anchor2:"kne",
+    track:"hip", start:"top", rom0:0.50, rom0Alt:0.95, anchor:"ank", anchor2:"kne", scale:"hipHeight",
     calib:"Stand tall and hold still",
     needs:[KP.lHip,KP.rHip,KP.lKne,KP.rKne,KP.lSho,KP.rSho],
     setup:"Set the phone <strong>on the floor or a bench, facing you head on</strong>, about 8–10 ft away with the lens near hip height. Your whole body has to stay in frame at the top <em>and</em> in the hole.",
@@ -567,7 +599,7 @@ const LIFTS={
   },
   bench:{
     name:"Bench Press", short:"Bench", view:"Side on",
-    track:"wrist", start:"top", rom0:0.70, anchor:"sho",
+    track:"wrist", start:"top", rom0:0.70, anchor:"sho", scale:"torso",
     calib:"Hold at lockout",
     needs:[KP.lSho,KP.rSho,KP.lElb,KP.rElb,KP.lWri,KP.rWri],
     setup:"Phone <strong>side on to the bench</strong>, 6–8 ft away, lens roughly at bench height. Frame from your hips to a foot above lockout.",
@@ -580,11 +612,11 @@ const LIFTS={
   },
   sumo:{
     name:"Sumo Deadlift", short:"Sumo DL", view:"Head on, low",
-    track:"wrist", start:"bottom", rom0:0.95, anchor:"ank", anchor2:"kne",
+    track:"wrist", start:"bottom", rom0:0.60, rom0Alt:1.20, anchor:"ank", anchor2:"kne", scale:"hipHeight",
     calib:"Hold your setup over the bar",
     needs:[KP.lHip,KP.rHip,KP.lKne,KP.rKne,KP.lSho,KP.rSho,KP.lWri,KP.rWri],
     setup:"Phone <strong>head on and low</strong> — around knee height — 8–10 ft away. The bar, your hips and your shoulders all need to be in frame.",
-    setup2:"The fault that matters most in sumo — hips shooting up before the bar leaves the floor — is a race between two heights, and heights read true from the front. Side on adds joint angles at lockout.",
+    setup2:"Keep the lens clear of the plates. Filmed from the end of the bar a plate sits between you and the camera and the tracking collapses — on a test clip that view scored 0.30 on the hands and 0.14 on the ankles, against 0.80 and 0.80 from the front.",
     measures:[["Hip timing","Whether your hips rise before the bar moves"],
               ["Lockout","Knee extension at the top — needs a side view"],
               ["Grind","Whether the bar stalled and restarted mid-pull"],
@@ -802,12 +834,100 @@ const Model={
     return tf.tidy(()=>{
       const out=this.net.execute(tf.browser.fromPixels(srcCanvas).expandDims(0).toInt());
       const d=out.dataSync(), kps=new Array(17);
+      const ox=pad.ox||0, oy=pad.oy||0;
       for(let i=0;i<17;i++){
-        const my=d[i*3]*192, mx=d[i*3+1]*192;   // model space -> letterboxed box -> source px
-        kps[i]={x:(mx-pad.dx)/pad.scale, y:(my-pad.dy)/pad.scale, s:d[i*3+2]};
+        const my=d[i*3]*192, mx=d[i*3+1]*192;   // model space -> crop -> source px
+        kps[i]={x:ox+(mx-pad.dx)/pad.scale, y:oy+(my-pad.dy)/pad.scale, s:d[i*3+2]};
       }
       return kps;
     });
+  }
+};
+
+/* ============================================================
+   3b. BAR — where the barbell is, without a model
+   ============================================================
+   The pose model has no idea what a barbell is, and the one thing it is least
+   sure of on a deadlift is the hands that are holding it. But the phone does
+   not move during a set, so anything in the picture that does is either the
+   lifter or the bar. Learn the still picture, subtract it, and look for the bar
+   where the lifter is not: out past his silhouette, where a loaded plate is the
+   only thing that can be.
+
+   This is what tells a rep from standing up after setting the bar down — the
+   one case that traces exactly the same path through every other measurement
+   the app has. */
+const Bar={
+  W:0, H:0, bg:null, ready:0,
+
+  reset(w,h){
+    this.W=w; this.H=h;
+    this.bg=new Uint8ClampedArray(w*h);
+    this.ready=0; this.seeded=false; this.tick=0;
+  },
+
+  /* Sigma-delta background: nudge each pixel one level toward what it currently
+     is. It converges on the median rather than the mean, so the lifter walking
+     through does not smear himself into the background, and it costs one
+     comparison per pixel. */
+  learn(grey){
+    const bg=this.bg;
+    /* Updating everywhere at the same rate quietly absorbs a lifter who stands
+       still into the background, and then he casts a ghost the moment he moves.
+       Anything already standing out gets updated a fraction as often, so it has
+       to be still for a long time before it counts as scenery. */
+    /* Seed from the first frame. Starting from black means every pixel is
+       far from the background, which the rule below then treats as foreground
+       and updates at a fraction of the rate — so it never converges at all. */
+    if(!this.seeded){ bg.set(grey); this.seeded=true; this.ready=0; return; }
+    const slow=(this.tick=(this.tick|0)+1)%8===0;
+    for(let i=0;i<grey.length;i++){
+      const g=grey[i], b=bg[i], d=g-b;
+      if(d>22||d<-22){ if(!slow) continue; }
+      if(d>0) bg[i]=b+1; else if(d<0) bg[i]=b-1;
+    }
+    if(this.ready<255) this.ready++;
+  },
+
+  /* Returns the bar's row in this grid, or null when it cannot see one.
+     xlo/xhi/ytop bound the lifter; the search happens just outside him. */
+  find(grey,xlo,xhi,ytop){
+    if(!this.bg||this.ready<40) return null;          // still learning the room
+    const W=this.W,H=this.H,bg=this.bg;
+    /* The gap matters more than it looks: too narrow and the lifter's own
+       edge falls inside the band, and the search follows him instead of the
+       bar. At a coarse grid a three-percent gap is a pixel or two of nothing. */
+    const pad=Math.round(W*0.32), gap=Math.max(4,Math.round(W*0.06));
+    const aL=Math.max(0,Math.round(xlo)-pad), bL=Math.max(0,Math.round(xlo)-gap);
+    const aR=Math.min(W,Math.round(xhi)+gap), bR=Math.min(W,Math.round(xhi)+pad);
+    const y0=Math.max(0,Math.round(ytop));
+    if(bL-aL<2&&bR-aR<2) return null;
+    /* Count the longest unbroken run, not the number of pixels. An arm or a
+       leg swinging through the band lights up plenty of pixels but never a wide
+       one; a plate is a solid disc and lights up a run several times wider than
+       any limb. Counting pixels cannot tell those apart and follows the lifter. */
+    const prof=new Float32Array(H);
+    const runIn=(row,x0,x1)=>{
+      let best=0,cur=0;
+      for(let x=x0;x<x1;x++){ const i=row+x,d=bg[i]-grey[i];
+        if(d>22&&grey[i]<bg[i]-10){ if(++cur>best) best=cur; } else cur=0; }
+      return best;
+    };
+    for(let y=y0;y<H;y++){
+      const row=y*W;
+      prof[y]=Math.max(runIn(row,aL,bL),runIn(row,aR,bR));
+    }
+    /* A plate is tall as well as wide, so smooth down the column before taking
+       the peak — a one-row streak is a shadow, not a bar. */
+    const k=Math.max(2,Math.round(H*0.018));      // a plate's worth of rows
+    let best=-1,bestV=0;
+    for(let y=y0+k;y<H-k;y++){
+      let v=0; for(let j=-k;j<=k;j++) v+=prof[y+j];
+      v/=(2*k+1);
+      if(v>bestV){ bestV=v; best=y; }
+    }
+    /* A run narrower than a third of the band is a limb, not a loaded bar. */
+    return bestV>=Math.max(3,W*0.075)?{y:best,mass:bestV}:null;
   }
 };
 
@@ -828,7 +948,7 @@ class Analyser{
     this.stillSince=null;           // commands are given only once the bar is motionless
     this.comp={phase:"idle",cmdAt:{},early:{},verdicts:[],nextArmAt:0};
     this.cfg=LIFTS[liftKey]; this.key=liftKey; this.H=frameH;
-    this.sigF=new OneEuro(1.6,0.04);
+    this.sigF=this.newSig();
     this.torsoF=new OneEuro(0.4,0.0);
     this.ancF=new OneEuro(0.6,0.0);
     /* Height and scale have to be read at the same instant. The heavily damped
@@ -846,7 +966,10 @@ class Analyser{
     this.vel=0; this.prev=null; this.bestVel=0; this.maxRom=0;
     this.liveCue=null; this.cueAt=0; this.lastRepEnd=0; this.pending=null;
     this.rejects=[]; this.lastGoodT=0; this.pendingStill=false;
-    this.viewR=null; this.shoK=null; this.thighRef=null;
+    this.viewR=null; this.viewFront=null; this.viewT0=null; this.spanOn=false;
+    this.tScores=[]; this.unitPx=null; this.unitAt=null; this.hhS=[]; this.unitLocked=false;
+    this.rawT=[]; this.rawStill=null;
+    this.shoK=null; this.thighRef=null; this.nearMiss=[];
     this.pitch=0; this.fpx=null; this.W=frameH;
   }
 
@@ -863,6 +986,78 @@ class Analyser{
   }
 
   ready(kps){ return this.cfg.needs.every(i=>kps[i].s>MIN_SCORE); }
+
+  /* Passing the minimum score is enough to measure a frame; it is not enough to
+     found a whole set on. Walking up to the bar the model is guessing at half
+     the joints — around 0.2 to 0.4 on the clips this was built against, against
+     0.6 to 0.8 once the lifter is set and still. */
+  /* The tracked point is the whole measurement. If the model is guessing at it
+     — hands buried between the legs on a sumo pull seen from the front — the
+     rep count and every number under it are fiction. Better to say the view
+     could not support the lift than to report five reps with a third-of-a-
+     second concentric. */
+  trackScore(kps){
+    return this.cfg.track==="hip"
+      ? Math.min(kps[KP.lHip].s,kps[KP.rHip].s)
+      : Math.min(kps[KP.lWri].s,kps[KP.rWri].s);
+  }
+
+  /* Median rather than mean: a handful of clear frames should not vouch for a
+     set the model spent mostly guessing at. */
+  trackQuality(){
+    if(this.tScores.length<20) return null;
+    const v=[...this.tScores].sort((a,b)=>a-b);
+    return +v[Math.floor(v.length/2)].toFixed(2);
+  }
+
+  /* Stillness, measured in raw pixels rather than in the normalised signal.
+     The unit is learned from a settled hold, and the normalised signal cannot
+     say whether the lifter is settled until the unit is right — so asking it
+     is circular, and on noisy footage it never resolves. Hip and ankle
+     positions on the screen answer the same question without depending on
+     anything the app has yet to work out. */
+  rawStillFor(t,g){
+    if(!g.hipOK||!isFinite(this.H)) return 0;
+    this.rawT.push({t,y:g.hip.y,a:this.anchorY==null?g.hip.y:this.anchorY});
+    while(this.rawT.length&&t-this.rawT[0].t>350) this.rawT.shift();
+    if(this.rawT.length<5) return 0;
+    let lo=1e9,hi=-1e9,la=1e9,ha=-1e9;
+    for(const q of this.rawT){
+      if(q.y<lo)lo=q.y; if(q.y>hi)hi=q.y;
+      if(q.a<la)la=q.a; if(q.a>ha)ha=q.a;
+    }
+    const move=Math.max(hi-lo,ha-la)/this.H;
+    if(move>0.020){ this.rawStill=null; return 0; }
+    if(this.rawStill==null) this.rawStill=this.rawT[0].t;
+    return t-this.rawStill;
+  }
+
+  unitSettled(t){
+    /* Bench is measured in torsos and needs no learning — the lifter is lying
+       still and it never changes. A pull may begin with the lifter already bent
+       over the bar, with no stood-up moment to learn from; rather than lose the
+       first rep waiting for one that is not coming, it falls back to the torso
+       and stays there. Whichever ruler the set starts on, it keeps. */
+    if(this.cfg.scale!=="hipHeight") return true;
+    if(this.unitPx!=null&&this.unitAt!=null&&t-this.unitAt>400) return true;
+    return this.cfg.start==="bottom";
+  }
+  /* The bootstrap range depends on which ruler was available. */
+  rom(){ return this.unitLocked?this.cfg.rom0:(this.cfg.rom0Alt||this.cfg.rom0); }
+  /* Speeds are in units per second, so every velocity threshold moves with the
+     unit. These were all set against torso lengths; this keeps them meaning the
+     same fraction of a rep however the set is being measured. */
+  vs(){ return this.rom()/0.95; }
+  /* One Euro's beta is in units of signal per second: it decides how much the
+     filter opens up when the signal moves. Halve the signal and the same beta
+     smooths twice as hard, which rounds the turnarounds and moves the phase
+     boundaries — the eccentric comes out short and the pause long. */
+  newSig(){ return new OneEuro(1.6,0.04/this.vs()); }
+
+  conf(kps){
+    let m=0; for(const i of this.cfg.needs) m+=kps[i].s;
+    return m/this.cfg.needs.length;
+  }
 
   /* ---- phone tilt ------------------------------------------------------
      A phone propped on the floor points up, and a camera that points up does
@@ -904,17 +1099,31 @@ class Analyser{
      would report a straight limb whatever it was doing, so they are withheld
      rather than guessed at. Heights are unaffected, which is why depth and
      bar speed read true either way. */
-  frontOn(){ return this.viewR!=null&&this.viewR>0.45; }
+  /* Decided once and then held. Re-judging every frame is not a refinement:
+     the answer picks which length the whole set is measured in, so a ratio
+     sitting near the threshold would swap the scale back and forth between
+     frames and shake the signal to pieces — no rep survives that. Anything
+     within a wide band of the threshold keeps whatever it settled on. */
+  frontOn(){
+    if(this.viewFront!=null) return this.viewFront;
+    return this.viewR!=null&&this.viewR>0.45;
+  }
+  settleView(t){
+    if(this.viewFront!=null||this.viewR==null) return;
+    if(this.viewT0==null){ this.viewT0=t; return; }
+    if(t-this.viewT0>1200) this.viewFront=this.viewR>0.45;
+  }
 
-  /* Recent horizontal movement of the reference, in torso lengths. */
+  /* Recent horizontal movement of the reference, as a fraction of the frame. */
   walking(t){
     if(this.ancX==null) return false;
-    this.xT.push({t,x:this.ancX});
+    /* Called from more than one place per frame; sample once. */
+    if(!this.xT.length||this.xT[this.xT.length-1].t!==t) this.xT.push({t,x:this.ancX});
     while(this.xT.length&&t-this.xT[0].t>1100) this.xT.shift();
     if(this.xT.length<6) return false;
     let lo=1e9,hi=-1e9;
     for(const q of this.xT){ if(q.x<lo)lo=q.x; if(q.x>hi)hi=q.x; }
-    return hi-lo>0.55;
+    return hi-lo>0.18;
   }
 
   spanX(){
@@ -988,14 +1197,14 @@ class Analyser{
       if(C.early.start) bad.push("Lowered before the command");
       if(C.early.press) bad.push("Pressed before the command");
       else if(c.pauseMsRaw!=null&&c.pauseMsRaw<200) bad.push("No pause on the chest");
-      if(c.minAscV!=null&&c.minAscV<-0.09) bad.push("Downward movement during the press");
+      if(c.minAscV!=null&&c.minAscV<-0.09*this.vs()) bad.push("Downward movement during the press");
       if(c.elbTop!=null&&c.elbTop<160) bad.push("No lockout");
     }
     if(this.key==="sumo"){
       if(c.kneeTop!=null&&c.kneeTop<165) bad.push("Knees not locked");
       if(c.hipTop!=null&&c.hipTop<160) bad.push("Hips not locked");
       if(c.zeroX>=3) bad.push("Hitching");
-      if(c.minAscV!=null&&c.minAscV<-0.09) bad.push("Downward movement during the pull");
+      if(c.minAscV!=null&&c.minAscV<-0.09*this.vs()) bad.push("Downward movement during the pull");
     }
     const v={i:this.reps.length,good:bad.length===0,reasons:bad};
     C.verdicts.push(v);
@@ -1033,7 +1242,8 @@ class Analyser{
               xMin:p.x,xMax:p.x,fromBottom:!!fromBottom,
               zeroX:0,prevVs:0,pMin:null,pMax:0,depth:null,leanBot:null,leanMid:null,
               minAscV:0,elbTop:null,kneeTop:null,hipTop:null,hipFirst:null,
-              aMinX:this.ancX,aMaxX:this.ancX,hipAngBot:null,thighBot:null};
+              aMinX:this.ancX,aMaxX:this.ancX,hipAngBot:null,thighBot:null,
+              barMin:null,barMax:null,hMin:null,hMax:null};
   }
 
   /* Threshold crossings tell us a rep happened; they are the wrong place to
@@ -1068,7 +1278,7 @@ class Analyser{
     let dI=tbI, uI=minI;
     for(let i=tbI;i<=minI;i++) if(seg[i].v<seg[dI].v) dI=i;   // fastest point down
     for(let i=minI;i<=taI;i++) if(seg[i].v>seg[uI].v) uI=i;   // fastest point up
-    const thD=Math.abs(seg[dI].v)*0.10, thU=Math.abs(seg[uI].v)*0.10;
+    const thD=Math.abs(seg[dI].v)*0.03, thU=Math.abs(seg[uI].v)*0.03;
 
     let cStart=uI, cEnd=uI;
     while(cStart>minI&&seg[cStart-1].v>=thU) cStart--;
@@ -1086,7 +1296,7 @@ class Analyser{
             conMs:Math.max(1,seg[cEnd].t-seg[cStart].t)};
   }
 
-  update(rawKps,t){
+  update(rawKps,t,barY){
     const kps=this.rectify(rawKps);
     const g=this.geom(kps);
     const miss=(!isFinite(g.torsoPx)||g.torsoPx<12)?"torso":(!this.ready(kps)?"kp":null);
@@ -1114,10 +1324,24 @@ class Analyser{
        forward, so from the front measure that instead, converted to torso
        lengths by the ratio between them while standing. */
     let tPx=g.torsoPx;
-    if(this.frontOn()&&this.shoK!=null&&isFinite(shoW)&&shoW>6) tPx=this.shoK*shoW;
+    if(this.cfg.scale==="hipHeight"&&this.unitPx!=null){
+      {
+        tPx=this.unitPx;
+        if(!this.spanOn){                        // first frame on the new ruler
+          this.spanOn=true;
+          this.sigF=this.newSig(); this.torsoF=new OneEuro(0.4,0.0);
+          this.torsoQ=new OneEuro(2.0,0.0);
+          this.calMin=this.calMax=null; this.calT0=null; this.calRun=0;
+          this.settledS=null; this.thighRef=null; this.trace.length=0;
+          if(!this.reps.length){ this.state="CALIB"; this.cur=null;
+                                 this.topRef=null; this.botRef=null; }
+        }
+      }
+    }
     this.torso=this.torsoF.filter(tPx,t);
     this.torsoS=this.torsoQ.filter(tPx,t);
     this.lastGoodT=t;
+    this.tScores.push(this.trackScore(kps));
 
     const pt=this.cfg.track==="hip"?g.hip:g.wri;
 
@@ -1146,7 +1370,7 @@ class Analyser{
       if(t-this.ancT0>600&&this.ancN>=8){
         this.ancMode=(this.ancP/this.ancN>=0.6||!F.ok)?"P":"F";
         this.anchored=true;
-        this.ancF=new OneEuro(0.6,0.0); this.sigF=new OneEuro(1.6,0.04);
+        this.ancF=new OneEuro(0.6,0.0); this.sigF=this.newSig();
         this.torsoQ=new OneEuro(2.0,0.0); this.torsoS=g.torsoPx;
         this.calMin=this.calMax=null; this.calT0=null; this.calRun=0; this.settledS=null;
         this.trace.length=0;          // measured against something else entirely
@@ -1165,8 +1389,33 @@ class Analyser{
     /* Where the feet are, across the frame. A squat drifts the knees forward a
        fraction of a torso; a step is worth one and a half. */
     const ax=(this.ancMode==="F"?(F.ok?F.x:null):(P.ok?P.x:(F.ok?F.x:null)));
-    if(ax!=null&&isFinite(this.torsoS)&&this.torsoS>0)
-      this.ancX=this.ancXF.filter(ax/this.torsoS,t);
+    /* Against the frame, not against the scale: any scale that moves during a
+       rep turns squatting into walking. A step crosses a good part of the
+       picture; knees travelling forward do not. */
+    if(ax!=null&&this.W>0) this.ancX=this.ancXF.filter(ax/this.W,t);
+    const holdFor=this.rawStillFor(t,g);
+    /* The first settled hold sets the ruler, and nothing revises it for the
+       rest of the set. Revising it was worse than being slightly wrong: every
+       measurement already taken was against the old one, and each correction
+       threw the range away and started the set again. Being a few percent out
+       costs nothing, because everything downstream is a ratio — and if it is
+       ever badly out, Re-zero is one tap. */
+    /* Lock as soon as the hold has said enough, not when it ends — the thing
+       that ends a lifter's hold is the first rep, and waiting for that costs
+       exactly that rep. Locking early was only ever unsafe while the ruler
+       could still be revised, and it cannot. */
+    /* Not until the reference itself is settled: measured against the knee
+       instead of the ankle the same hips read barely half as high, and a ruler
+       locked on that is wrong for the whole set. */
+    if(!this.unitLocked&&this.ancMode!=null&&this.state==="CALIB"&&
+       this.hhS.length>=5&&holdFor>=400){
+      const v=[...this.hhS].sort((x,y)=>x-y);
+      this.unitPx=v[Math.floor(v.length/2)];
+      this.unitLocked=true; this.unitAt=t;
+      this.trace.length=0; this.sigF=this.newSig();
+      this.topRef=null; this.botRef=null; this.cur=null; this.state="CALIB";
+    }
+    if(!holdFor) this.hhS.length=0;
     const s=this.sigF.filter((this.anchorY-pt.y)/this.torsoS,t);   // height above the reference
 
     if(this.t0==null) this.t0=t;
@@ -1177,21 +1426,34 @@ class Analyser{
     this.prev={t,s};
     /* Standing still and upright, every proportion is seen at full length.
        That is the only moment worth learning them from. */
-    if(this.stillSince!=null&&t-this.stillSince>250&&
-       (this.state==="TOP"||this.state==="CALIB")&&isFinite(g.torsoPx)&&g.torsoPx>0){
-      if(g.hipOK&&g.kneOK){
-        const th=dist(g.hip,g.kne)/g.torsoPx;
-        if(th>0.55&&th<1.40) this.thighRef=this.thighRef==null?th:0.9*this.thighRef+0.1*th;
+    if(holdFor>250&&(this.state==="TOP"||this.state==="CALIB")&&
+       isFinite(g.torsoPx)&&g.torsoPx>0){
+      /* Standing hip height, in pixels: the tallest the hips get while the
+         lifter is settled and the model is sure of them. Taken as a high-water
+         mark because standing is the top of that range and a deadlift setup is
+         not — the lifter is bent over the bar when they hold still. */
+      if(this.cfg.scale==="hipHeight"&&this.anchorY!=null&&g.hipOK&&this.conf(kps)>0.45){
+        /* One settled hold is enough, and it is the right one: before the
+           first rep the lifter is stood up. Take the median of that hold and
+           then leave it alone — a ruler that keeps being revised is a ruler
+           every earlier measurement was taken against something else. */
+        const hh=this.anchorY-g.hip.y;
+        if(this.ancMode!=null&&hh>this.H*0.10&&this.hhS.length<40) this.hhS.push(hh);
+      }
+      if(g.hipOK&&g.kneOK&&isFinite(this.torso)&&this.torso>0){
+        const th=dist(g.hip,g.kne)/this.torso;   // same unit the correction is applied in
+        if(th>0.20&&th<1.40) this.thighRef=this.thighRef==null?th:0.9*this.thighRef+0.1*th;
       }
       if(isFinite(shoW)&&shoW>6){
         const k=g.torsoPx/shoW;
         if(k>0.7&&k<3.0) this.shoK=this.shoK==null?k:0.9*this.shoK+0.1*k;
       }
     }
-    if(Math.abs(this.vel)>0.05) this.stillSince=null;
+    if(Math.abs(this.vel)>0.05*this.vs()) this.stillSince=null;
     else if(this.stillSince==null) this.stillSince=t;
     const stillFor=this.stillSince==null?0:t-this.stillSince;
     if(stillFor>=300) this.settledS=s;
+    this.settleView(t);
     this.trace.push({t:t-this.t0,s,v:this.vel});
     if(this.trace.length>5000) this.trace.shift();
 
@@ -1204,30 +1466,56 @@ class Analyser{
        direction the lift must go, and take the extreme seen up to then. */
     if(this.state==="CALIB"){
       const fromBottom=this.cfg.start==="bottom";
+      /* Nothing is measured before the ruler exists. Waiting here rather than
+         measuring in torsos and switching later is what keeps the first rep the
+         same shape as the rest: a set that changes scale halfway through has
+         one rep recorded against something else. */
+      if(this.cfg.scale==="hipHeight"&&!this.unitLocked&&!fromBottom){
+        this.compTick(t,1,stillFor);
+        return {ok:true,g,s,calibrating:true};
+      }
       if(this.calT0==null) this.calT0=t;
       if(this.calMin==null||s<this.calMin) this.calMin=s;
       if(this.calMax==null||s>this.calMax) this.calMax=s;
-      const rightWay=fromBottom?(this.vel>0.10):(this.vel<-0.10);
-      this.calRun=rightWay?this.calRun+1:0;
-      const moved=fromBottom?(s-this.calMin):(this.calMax-s);
-      if(t-this.calT0>500&&this.calRun>=3&&moved>0.07){
-        /* The extreme sample is whatever the walkout happened to touch. Where
-           the lifter last stood still is what they will return to. */
-        if(fromBottom){
-          this.botRef=this.settledS!=null?Math.min(this.settledS,this.calMin+0.10):this.calMin;
-          this.topRef=this.botRef+this.cfg.rom0; this.state="BOTTOM";
-        }else{
-          this.topRef=this.settledS!=null?Math.max(this.settledS,this.calMax-0.10):this.calMax;
-          this.botRef=this.topRef-this.cfg.rom0; this.state="TOP";
+      const sure=this.conf(kps)>0.45;
+      /* A lift that starts at the top has its reference standing in front of
+         you: the height held while set. Waiting for a descent instead means
+         the walkout can supply it, and it does. */
+      if(!fromBottom){
+        if(sure&&holdFor>=700&&this.unitSettled(t)&&!this.walking(t)){
+          this.topRef=s; this.botRef=s-this.rom(); this.state="TOP";
         }
+        this.compTick(t,1,stillFor);
+        return {ok:true,g,s,calibrating:this.state==="CALIB"};
+      }
+      /* A pull starts from a position that cannot be mistaken for standing
+         about: gripping a bar on the floor puts the hands below the knees, and
+         nothing else in a gym does. Waiting for the first upward movement
+         instead lets the walk to the bar supply the floor reference — an arm
+         swing is movement in the right direction of about the right size. */
+      const set=g.wriOK&&g.kneOK&&g.wri.y>g.kne.y;
+      if(sure&&set&&holdFor>=300&&this.unitSettled(t)&&!this.walking(t)){
+        this.botRef=s; this.topRef=s+this.rom(); this.state="BOTTOM";
       }
       this.compTick(t,1,stillFor);
       return {ok:true,g,s,calibrating:true};
     }
 
+    /* The bar, in the same units as everything else, so it can be compared
+       with the hands that are supposed to be holding it. */
+    if(this.cur){
+      if(this.cur.hMin==null||s<this.cur.hMin) this.cur.hMin=s;
+      if(this.cur.hMax==null||s>this.cur.hMax) this.cur.hMax=s;
+      if(barY!=null&&this.anchorY!=null&&isFinite(this.torsoS)&&this.torsoS>0){
+        const b=(this.anchorY-this.rectPt(this.W/2,barY).y)/this.torsoS;
+        if(this.cur.barMin==null||b<this.cur.barMin) this.cur.barMin=b;
+        if(this.cur.barMax==null||b>this.cur.barMax) this.cur.barMax=b;
+      }
+    }
+
     const range=Math.max(0.12,this.topRef-this.botRef);
     const p=(s-this.botRef)/range;                    // 1 = top, 0 = bottom
-    const vEps=0.06;
+    const vEps=0.06*this.vs();
 
     switch(this.state){
       case "TOP":
@@ -1237,7 +1525,7 @@ class Analyser{
            standing now is the top, so move it here rather than wait for a rep
            that can never close. */
         else if(stillFor>700&&!this.reps.length){
-          this.topRef=s; this.botRef=s-this.cfg.rom0;
+          this.topRef=s; this.botRef=s-this.rom();
         }
         if(p<0.80&&this.vel<-vEps&&!this.walking(t)){
           if(this.mode==="comp"&&this.key!=="sumo"&&this.comp.phase!=="ready") this.comp.early.start=true;
@@ -1289,7 +1577,7 @@ class Analyser{
         if(!this.cur.fromBottom){
           const drop=this.cur.sStart-this.cur.sBot, rise=s-this.cur.sBot;
           if(rise>this.cur.riseMax) this.cur.riseMax=rise;
-          const real=drop>=(this.reps.length?0.60*this.maxRom:0.45*this.cfg.rom0);
+          const real=drop>=(this.reps.length?0.60*this.maxRom:0.45*this.rom());
           if(!real&&!this.reps.length&&stillFor>800){ this.abandon(s); break; }
           if(real&&rise>=0.90*drop&&this.vel<vEps&&this.isRep()){
             const top=this.cur.sBot+drop;
@@ -1300,7 +1588,7 @@ class Analyser{
           /* Only a genuine bail from here: a rep that got most of the way home
              has finished, whatever the reference says. */
           if(this.cur.riseMax<0.75*drop&&this.cur.pMax>0.45&&p<0.30){
-            if(this.reps.length) this.rejectRep(t,"sank",p); else this.abandon(s);
+            if(real) this.rejectRep(t,"sank",p); else this.abandon(s);
             break;
           }
         } else if(this.cur.pMax>0.45&&p<0.30){ this.rejectRep(t,"sank",p); break; }
@@ -1388,11 +1676,15 @@ class Analyser{
     this.state="CALIB"; this.calMin=this.calMax=null; this.calRun=0; this.calT0=null;
     this.settledS=null; this.cur=null; this.pending=null; this.pendingStill=false;
     this.topRef=null; this.botRef=null;
-    this.sigF=new OneEuro(1.6,0.04); this.ancF=new OneEuro(0.6,0.0);
+    this.sigF=this.newSig(); this.ancF=new OneEuro(0.6,0.0);
     this.torsoQ=new OneEuro(2.0,0.0); this.torsoF=new OneEuro(0.4,0.0);
     this.trace.length=0;
     this.anchored=false; this.anchorY=null; this.prev=null; this.vel=0;
     this.ancMode=null; this.ancT0=null; this.ancN=0; this.ancP=0; this.ancMiss=null;
+    /* The usual reason to re-zero is that the phone moved, and a ruler measured
+       in pixels before it moved is the wrong length after. Learn it again. */
+    this.unitPx=null; this.unitAt=null; this.unitLocked=false; this.hhS=[];
+    this.rawT=[]; this.rawStill=null; this.spanOn=false;
     this.comp.phase="idle"; this.comp.cmdAt={}; this.comp.early={};
     this.push("Ready.");
     this.liveCue={sev:"good",label:"Re-zeroed",text:this.cfg.calib,speak:null};
@@ -1403,22 +1695,43 @@ class Analyser{
      is nothing to compare against, and ducking under the bar on the walkout
      looks a great deal like a shallow squat. So ask what the body did rather
      than how far the tracked point moved. */
+  note(why,c,drop){
+    if(this.nearMiss.length<14)
+      this.nearMiss.push({why,
+        drop:+(drop||0).toFixed(3),
+        depth:c.depth==null?null:+(c.depth+Calib.depth).toFixed(3),
+        span:c.aMinX==null?null:+(c.aMaxX-c.aMinX).toFixed(2),
+        need:+((this.reps.length?0.40*this.maxRom:0.38*this.rom())).toFixed(3)});
+    return false;
+  }
+
   isRep(){
     const c=this.cur;
-    if(!c||c.fromBottom) return true;              // a pull starts on the floor
+    if(!c) return true;
+    /* A rep on a lift held in the hands ought to be judged on the bar going up
+       rather than the hands, which is the one thing that would separate a pull
+       from standing up after setting the bar down. The bar tracker below finds
+       the bar reliably enough offline to prove that; running forward-only on a
+       downscaled frame it does not yet, and a detector that wrongly says "the
+       bar stayed down" costs a real rep. So the bar is measured and recorded,
+       and nothing is rejected on it until it earns that. */
+    if(c.fromBottom) return true;                  // a pull starts on the floor
     /* Measured from the top, not from where the descent tripped the threshold
        a fifth of the way down — that dead zone is a fifth of the range, and
        counting it as missing range turns a legal squat into a non-rep. */
     const drop=Math.max(c.sStart,this.topRef)-c.sBot;
-    if(drop<(this.reps.length?0.40*this.maxRom:0.45*this.cfg.rom0)) return false;
+    if(drop<(this.reps.length?0.40*this.maxRom:0.38*this.rom()))
+      return this.note("didn't travel far enough",c,drop);
     /* Feet stay planted through a squat. They do not through a walkout. */
-    if(c.aMinX!=null&&c.aMaxX-c.aMinX>0.60) return false;
+    if(c.aMinX!=null&&c.aMaxX-c.aMinX>0.20)
+      return this.note("feet moved across the frame",c,drop);
     /* Until the set has a range of its own, the thing that separates a squat
        from ducking under the bar is simply how far down the hips got. Standing
        reads about −0.75; even a high squat that would be turned down on a
        platform reads better than −0.3. Nothing legal sits below this. */
     if(this.key==="squat"&&!this.reps.length&&c.depth!=null&&
-       c.depth+Calib.depth<-0.45) return false;
+       c.depth+Calib.depth<-0.33*(this.thighRef!=null?this.thighRef:0.90))
+      return this.note("hips stayed too high",c,drop);
     return true;
   }
 
@@ -1427,7 +1740,7 @@ class Analyser{
      this settled position as the top, which is what it actually is. */
   abandon(s){
     this.cur=null; this.pendingStill=false; this.state="TOP";
-    if(isFinite(s)){ this.topRef=s; this.botRef=s-this.cfg.rom0; }
+    if(isFinite(s)){ this.topRef=s; this.botRef=s-this.rom(); }
   }
 
   /* A rep that started and never finished. Saying why is the whole point —
@@ -1467,10 +1780,19 @@ class Analyser{
 
     if(this.key==="squat"){
       if(c.depth!=null){
-        const d=c.depth+Calib.depth, cm=(x)=>x.toFixed(3);
-        if(d<-0.03)     faults.push(["fault","High",`Hip crease ${cm(-d)} torso lengths above the top of the knee`]);
-        else if(d<0.02) faults.push(["good","Parallel","Hip crease level with the top of the knee"]);
-        else            faults.push(["good","Below parallel",`Hip crease ${cm(d)} torso lengths below the top of the knee`]);
+        /* Written against the femur rather than against whatever the set is
+           being measured in: a centimetre is a centimetre, and stating the
+           tolerance as a fraction of thigh length keeps it one whether the
+           ruler is a torso or a hip height. */
+        /* Within a couple of centimetres of the line the keypoints jitter by
+           more than the call is worth, so it says so instead of pretending.
+           A borderline rep is not scored as a fault — on a platform it is a
+           coin flip, and the still is there to settle it. */
+        const th=this.thighRef!=null?this.thighRef:0.90;
+        const d=c.depth+Calib.depth, cm=(x)=>(x/th*0.90).toFixed(3);
+        if(d<-0.047*th)      faults.push(["fault","High",`Hip crease ${cm(-d)} thigh-lengths above the top of the knee`]);
+        else if(d<0.047*th)  faults.push(["good","Borderline","Within a couple of centimetres of parallel — too close to call. Check the still."]);
+        else                 faults.push(["good","Below parallel",`Hip crease ${cm(d)} thigh-lengths below the top of the knee`]);
       }
       if(!this.frontOn()&&c.leanBot!=null&&c.leanMid!=null&&c.leanMid-c.leanBot>11)
         faults.push(["fault","Hips first",`Chest dropped ${Math.round(c.leanMid-c.leanBot)}° further on the way up`]);
@@ -1569,6 +1891,20 @@ class Analyser{
         return Object.assign({reps:[],quality:0,sRom:0,sTempo:0,sForm:0,velLoss:0,
           rir:"—",rirNote:"",maxRom:0,bestVel:0,romPcts:[],tempoCV:0,lift:this.key,
           faults:[],nRejects:this.rejects.length,tut:0,trace:this.packTrace()},this.compBits());
+      /* Counting nothing is a result too, and a far more useful one than
+         silence: the movements were seen and measured, they just failed a
+         test. Say which test, and by how much. */
+      if(this.nearMiss.length||this.rejects.length||this.trace.length>60)
+        return {reps:[],quality:0,sRom:0,sTempo:0,sForm:0,velLoss:0,rir:"—",rirNote:"",
+          maxRom:0,bestVel:0,romPcts:[],tempoCV:0,lift:this.key,faults:[],
+          nRejects:this.rejects.length,tut:0,trace:this.packTrace(),
+          front:this.frontOn(),unchecked:[],
+          viewR:this.viewR==null?null:+this.viewR.toFixed(2),
+          tilt:this.pitch?Math.round(this.pitch*180/Math.PI):0,
+          nearMiss:this.nearMiss, empty:true, trackQ:this.trackQuality(),
+          topRef:this.topRef==null?null:+this.topRef.toFixed(2),
+          botRef:this.botRef==null?null:+this.botRef.toFixed(2),
+          anchor:this.ancMode==="F"?(this.cfg.anchor2||"—"):this.cfg.anchor};
       return null;
     }
     const front=this.frontOn();
@@ -1622,6 +1958,8 @@ class Analyser{
             faults:[...rbag.values()].concat(faults), nRejects:this.rejects.length,
             front,unchecked,viewR:this.viewR==null?null:+this.viewR.toFixed(2),
             tilt:this.pitch?Math.round(this.pitch*180/Math.PI):0,
+            nearMiss:this.nearMiss, trackQ:this.trackQuality(),
+            anchor:this.ancMode==="F"?(this.cfg.anchor2||"—"):this.cfg.anchor,
             tut:R.reduce((a,r)=>a+(r.eccMs||0)+(r.pauseMs||0)+r.conMs,0)/1000},this.compBits());
   }
 }
@@ -1636,8 +1974,9 @@ const App={
   wakeLock:null, installPrompt:null, phase:null, spokenAt:0,
   mode:"training", recordOn:true, rec:null, chunks:[], recStart:0,
   lastRec:null, videoUrl:null, videoUrlFor:null,
-  stillCanvas:null, stillReady:false, repCount:0,
+  stillCanvas:null, stillReady:false, repCount:0, cropBox:null, boxMiss:0,
   proc:document.createElement("canvas"),
+  bgc:document.createElement("canvas"),
 
   /* ---- set recording -------------------------------------------------
      The clip is the evidence behind the numbers: a depth call you disagree
@@ -1685,6 +2024,7 @@ const App={
   async init(){
     this.proc.width=192; this.proc.height=192;
     this.pctx=this.proc.getContext("2d",{willReadFrequently:true});
+    this.bctx=this.bgc.getContext("2d",{willReadFrequently:true});
     this.renderLifts(); this.renderSetup();
 
     $("btn-history").onclick=()=>{renderHistoryInto();show("s-history");};
@@ -1692,7 +2032,10 @@ const App={
     $("btn-review-close").onclick=()=>show("s-setup");
     $("btn-start").onclick=()=>{ this.armTilt(); this.start(); };
     $("btn-stop").onclick=()=>this.stop();
-    $("btn-rezero").onclick=()=>{ if(this.analyser) this.analyser.rezero(performance.now()); };
+    $("btn-rezero").onclick=()=>{
+      this.cropBox=null; this.boxMiss=0;
+      if(this.analyser) this.analyser.rezero(performance.now());
+    };
     Voice.init();
     const vseg=$("voice-seg");
     const paintVoice=()=>[...vseg.children].forEach(c=>
@@ -1834,6 +2177,8 @@ const App={
     /* Frozen for the set: the phone is not moving, and a reading that wandered
        would step every measurement that depends on it. */
     this.setTilt=this.tilt||0;
+    this.cropBox=null; this.boxMiss=0;      // find him in the whole frame first
+    this.bgc.width=0; this.bgc.height=0;    // and learn the room from scratch
     this.analyser=new Analyser(this.lift,v.videoHeight||720,this.mode);
     this.startRecording();
     this.running=true; this.frames=0; this.fpsT=performance.now(); this.scopeBox=null;
@@ -1896,18 +2241,55 @@ const App={
       }
     }
 
-    const scale=Math.min(192/vw,192/vh);                 // letterbox into the model input
-    const dw=vw*scale, dh=vh*scale, dx=(192-dw)/2, dy=(192-dh)/2;
+    /* The model input is 192x192 whatever it is given. Handing it the whole
+       picture spends most of that on the garage: letterbox a wide frame and
+       nearly half is black bars, and a lifter who was a small part of a wide
+       shot ends up a few dozen pixels tall. Following him with a crop instead
+       roughly doubled the model's confidence in every joint on a test clip —
+       hands over a bar went from 0.21 to 0.53 — which is the difference between
+       a lift that can be measured and one that cannot. */
+    const B=this.cropBox||{x0:0,y0:0,x1:vw,y1:vh};
+    const cw=Math.max(20,B.x1-B.x0), ch=Math.max(20,B.y1-B.y0);
+    const scale=Math.min(192/cw,192/ch);
+    const dw=cw*scale, dh=ch*scale, dx=(192-dw)/2, dy=(192-dh)/2;
     this.pctx.fillStyle="#000"; this.pctx.fillRect(0,0,192,192);
-    this.pctx.drawImage(v,dx,dy,dw,dh);
+    this.pctx.drawImage(v,B.x0,B.y0,cw,ch,dx,dy,dw,dh);
 
     const t=performance.now();
     let kps=null;
-    try{ kps=Model.predict(this.proc,{dx,dy,scale}); }catch(e){ /* transient GPU hiccup */ }
+    try{ kps=Model.predict(this.proc,{dx,dy,scale,ox:B.x0,oy:B.y0}); }catch(e){ /* transient GPU hiccup */ }
+    if(kps) this.trackBox(kps,vw,vh);
+
+    /* The bar, found by what moved rather than by a model. Kept at a small
+       fixed size — the whole frame, not the crop, because a background only
+       means anything in coordinates that do not move. */
+    let barY=null;
+    if(kps){
+      const m=Math.max(vw,vh), bw=Math.max(64,Math.round(256*vw/m)), bh=Math.max(64,Math.round(256*vh/m));
+      if(this.bgc.width!==bw||this.bgc.height!==bh){
+        this.bgc.width=bw; this.bgc.height=bh; Bar.reset(bw,bh);
+      }
+      try{
+        this.bctx.drawImage(v,0,0,bw,bh);
+        const d=this.bctx.getImageData(0,0,bw,bh).data;
+        const grey=this.greyBuf&&this.greyBuf.length===bw*bh?this.greyBuf:(this.greyBuf=new Uint8ClampedArray(bw*bh));
+        for(let i=0,j=0;i<grey.length;i++,j+=4)
+          grey[i]=(d[j]*77+d[j+1]*150+d[j+2]*29)>>8;
+        Bar.learn(grey);
+        const good=kps.filter(k=>k.s>0.30);
+        if(good.length>=5){
+          const sx=bw/vw, sy=bh/vh;
+          let xlo=1e9,xhi=-1e9,yt=1e9;
+          for(const k of good){ if(k.x<xlo)xlo=k.x; if(k.x>xhi)xhi=k.x; if(k.y<yt)yt=k.y; }
+          const hit=Bar.find(grey,xlo*sx,xhi*sx,yt*sy);
+          if(hit) barY=hit.y/sy;
+        }
+      }catch(e){ /* a frame we could not read is a frame without a bar */ }
+    }
 
     if(kps){
       const a=this.analyser;
-      const res=a.update(kps,t);
+      const res=a.update(kps,t,barY);
       /* Redraw the still on every new deepest frame, but only encode it once
          the rep closes — encoding on the render loop would cost frames. */
       if(a.pendingStill){ a.pendingStill=false; this.stillReady=paintStill(v,kps,a); }
@@ -1929,6 +2311,33 @@ const App={
       $("fps-text").textContent=this.fps.toFixed(0)+" fps";
     }
     requestAnimationFrame(()=>this.loop());
+  },
+
+  /* Keep the crop around whatever the model was sure of, square so the
+     letterbox inside it wastes nothing, and never so tight that a step out of
+     frame loses him. Three bad frames in a row and it looks at everything
+     again rather than hunting in the wrong corner. */
+  trackBox(kps,vw,vh){
+    const good=kps.filter(k=>k.s>0.30);
+    if(good.length<5){
+      if((this.boxMiss=(this.boxMiss||0)+1)>3){ this.cropBox=null; this.boxMiss=0; }
+      return;
+    }
+    this.boxMiss=0;
+    let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;
+    for(const k of good){ if(k.x<x0)x0=k.x; if(k.x>x1)x1=k.x;
+                          if(k.y<y0)y0=k.y; if(k.y>y1)y1=k.y; }
+    const cx=(x0+x1)/2, cy=(y0+y1)/2;
+    let half=Math.max(x1-x0,y1-y0)/2*1.45;
+    half=Math.max(half,Math.min(vw,vh)*0.18);
+    const b={x0:cx-half,y0:cy-half,x1:cx+half,y1:cy+half};
+    if(b.x0<0){ b.x1-=b.x0; b.x0=0; }
+    if(b.y0<0){ b.y1-=b.y0; b.y0=0; }
+    if(b.x1>vw){ b.x0-=(b.x1-vw); b.x1=vw; }
+    if(b.y1>vh){ b.y0-=(b.y1-vh); b.y1=vh; }
+    b.x0=Math.max(0,b.x0); b.y0=Math.max(0,b.y0);
+    b.x1=Math.min(vw,b.x1); b.y1=Math.min(vh,b.y1);
+    if(b.x1-b.x0>20&&b.y1-b.y0>20) this.cropBox=b;
   },
 
   updateHUD(res,t){
@@ -2192,6 +2601,34 @@ function barChart(vals,labels,fmtV,lowFn){
     <div class="blabs">${labels.map(l=>`<span>${l}</span>`).join("")}</div>`;
 }
 
+/* The clip and its seek controls are wired the same way whichever page was
+   rendered, so the report and the nothing-counted page share this. */
+function bindVideo(rec){
+  const vid=$("rv-video");
+  /* Revoking the URL on every re-render cancels an in-flight load; keep it
+     while the set is the same and release it only on moving to another. */
+  if(App.videoUrl&&App.videoUrlFor!==rec.id){
+    try{ URL.revokeObjectURL(App.videoUrl); }catch(e){}
+    App.videoUrl=null; App.videoUrlFor=null;
+  }
+  if(vid&&rec.video){
+    try{
+      if(!App.videoUrl){ App.videoUrl=URL.createObjectURL(rec.video); App.videoUrlFor=rec.id; }
+      vid.src=App.videoUrl;
+    }catch(e){}
+  }
+  const off=rec.videoOffset||0;
+  $("review-body").querySelectorAll("[data-seek]").forEach(el=>{
+    el.onclick=()=>{
+      if(!vid) return;
+      const at=parseFloat(el.dataset.seek);
+      if(!isFinite(at)) return;
+      try{ vid.currentTime=Math.max(0,off+at-0.4); vid.play().catch(()=>{}); }catch(e){}
+      vid.scrollIntoView({block:"nearest",behavior:"smooth"});
+    };
+  });
+}
+
 function renderReview(rec){
   const s=rec.summary, liftKey=rec.lift, c=LIFTS[liftKey]||{name:liftKey,track:"hip"};
   $("rv-title").textContent=(s.comp?"Comp · ":"")+c.name;
@@ -2200,6 +2637,50 @@ function renderReview(rec){
       : `${s.reps.length} rep${s.reps.length===1?"":"s"} · `)
     +(s.nRejects?`${s.nRejects} not counted · `:"")
     +new Date(rec.ts).toLocaleDateString(undefined,{month:"short",day:"numeric"});
+
+  /* A set that counted nothing gets its own page. The charts below all assume
+     at least one rep, and more to the point none of them would answer the only
+     question worth asking here. */
+  if(s.empty){
+    const M=s.nearMiss||[];
+    const row=(k,v)=>`<tr><td class="dk">${k}</td><td class="dv">${v}</td></tr>`;
+    $("rv-sub").textContent="Nothing counted · "+new Date(rec.ts).toLocaleDateString(undefined,{month:"short",day:"numeric"});
+    $("review-body").innerHTML=`
+      <div class="viewnote">
+        <span class="vk">No reps</span>
+        <span class="vt">The camera tracked you the whole time — this is not a framing
+          failure. ${M.length?`It saw <b>${M.length}</b> movement${M.length===1?"":"s"}
+          that could have been a rep and turned ${M.length===1?"it":"them"} down.
+          The numbers are below.`:`It never saw a movement large enough to test as a rep.`}</span>
+      </div>
+      <div class="chart-card">
+        <div class="chart-head"><div class="t">What it settled on</div>
+          <div class="s">The choices the whole measurement rests on.</div></div>
+        <table class="dtable">
+          ${row("View",s.front?"Head on":"Side on")}
+          ${row("Height measured against",s.anchor==="ank"?"Your ankles":s.anchor==="kne"?"Your knees":s.anchor==="sho"?"Your shoulders":"—")}
+          ${row("Phone tilt",s.tilt?`${Math.abs(s.tilt)}\u00B0 ${s.tilt>0?"up":"down"}`:"level, or not reported")}
+          ${row("Range it learned",s.topRef!=null&&s.botRef!=null?`${s.botRef} to ${s.topRef} torso lengths`:"never locked on")}
+        </table>
+      </div>
+      ${M.length?`
+      <div class="chart-card">
+        <div class="chart-head"><div class="t">Movements it turned down</div>
+          <div class="s">Travel is in torso lengths; depth is the hip crease against the top of the knee, where 0 is parallel and standing is about &minus;0.8.</div></div>
+        <table class="dtable">
+          <tr><th>#</th><th>Why</th><th>Travel</th><th>Needed</th><th>Depth</th><th>Feet</th></tr>
+          ${M.map((m,i)=>`<tr><td class="dk">${i+1}</td><td class="dv">${m.why}</td>
+             <td class="dn">${m.drop}</td><td class="dn">${m.need}</td>
+             <td class="dn">${m.depth==null?"—":m.depth}</td>
+             <td class="dn">${m.span==null?"—":m.span}</td></tr>`).join("")}
+        </table>
+      </div>`:""}
+      ${rec.video?`<div class="chart-card"><video id="rv-video" playsinline controls preload="metadata"></video>
+        <div class="chart-head" style="margin:13px 0 0"><div class="t">The set</div>
+        <div class="s">Worth watching alongside the numbers above.</div></div></div>`:""}`;
+    if(rec.video) attachVideo(rec);
+    return;
+  }
 
   const romPcts=(s.romPcts||[]).map(v=>Math.round(v));
   const trace=s.trace||[];               // already packed down when the set was saved
@@ -2224,6 +2705,16 @@ function renderReview(rec){
   }
 
   $("review-body").innerHTML=`
+    ${(s.trackQ!=null&&s.trackQ<0.50)?`
+    <div class="viewnote">
+      <span class="vk">Weak signal</span>
+      <span class="vt">The model was only ${Math.round(s.trackQ*100)}% sure where
+        ${LIFTS[liftKey]&&LIFTS[liftKey].track==="wrist"?"your hands":"your hips"} were,
+        across most of this set — usually because the camera cannot see them from where it
+        was standing. Everything below is built on that, so treat it as indicative rather
+        than measured, and try the view the setup card suggests.</span>
+    </div>`:""}
+
     ${(s.tilt&&Math.abs(s.tilt)>=8)?`
     <div class="viewnote">
       <span class="vk">Tilt ${Math.abs(s.tilt)}\u00B0</span>
@@ -2291,7 +2782,7 @@ function renderReview(rec){
         </div>
         <p class="note" style="margin-top:12px">
           Torso lengths, hip crease against the top of the knee: <strong>+ is below the knee</strong>
-          and legal, &minus; is above it. Watch your shallowest rep back — if it was legal depth,
+          and legal, &minus; is above it, measured in thigh-lengths. Watch your shallowest rep back — if it was legal depth,
           calibrate to it and everything at least that deep passes from now on.
         </p>
         <div class="btn-row" style="margin-top:10px">
@@ -2424,31 +2915,10 @@ function renderReview(rec){
     </div>
     ${rec.id?`<button class="sec-btn" id="btn-del" style="width:100%;color:var(--fault);border-color:rgba(229,72,77,.4)">Delete this set</button>`:""}`;
 
-  /* Hook up the clip and every seek control the report just rendered. */
-  const vid=$("rv-video");
+  bindVideo(rec);
+
   /* The report re-renders whenever depth is recalibrated. Revoking the clip's
-     URL each time cancels an in-flight load; keep it while the set is the same
-     and only release it when moving to a different one. */
-  if(App.videoUrl&&App.videoUrlFor!==rec.id){
-    try{ URL.revokeObjectURL(App.videoUrl); }catch(e){}
-    App.videoUrl=null; App.videoUrlFor=null;
-  }
-  if(vid&&rec.video){
-    try{
-      if(!App.videoUrl){ App.videoUrl=URL.createObjectURL(rec.video); App.videoUrlFor=rec.id; }
-      vid.src=App.videoUrl;
-    }catch(e){}
-  }
-  const off=rec.videoOffset||0;
-  $("review-body").querySelectorAll("[data-seek]").forEach(el=>{
-    el.onclick=()=>{
-      if(!vid) return;
-      const at=parseFloat(el.dataset.seek);
-      if(!isFinite(at)) return;
-      try{ vid.currentTime=Math.max(0,off+at-0.4); vid.play().catch(()=>{}); }catch(e){}
-      vid.scrollIntoView({block:"nearest",behavior:"smooth"});
-    };
-  });
+     URL each time cancels an in-flight load — that is handled in bindVideo. */
 
   /* Two taps to delete: a stray tap on a set you wanted to keep is not
      recoverable, and a modal for this would be worse. */
