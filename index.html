@@ -225,6 +225,13 @@ h1{margin:0;text-wrap:balance;font-weight:800;letter-spacing:-.02em;}
 .readout{display:flex;align-items:flex-end;gap:16px;}
 .readout .big{font-family:var(--mono);font-weight:600;font-size:60px;line-height:.82;letter-spacing:-.04em;font-variant-numeric:tabular-nums;color:var(--ink);transition:color .2s;}
 .readout .big.pulse{color:var(--amber);}
+/* On a squat the depth is the number worth reading from across a garage, and
+   the rep count is the one already being spoken aloud. Swap which of them gets
+   the size. */
+.readout.is-squat .big{font-size:38px;}
+.readout .big.depth{font-size:64px;color:var(--faint);}
+.readout.is-squat .big.depth.under{color:var(--amber);}
+.readout.is-squat .big.depth.past{color:var(--good);}
 .readout .biglab{font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--faint);margin-top:6px;}
 .readout .side{display:flex;gap:14px;margin-left:auto;}
 .mini{text-align:right;}
@@ -241,6 +248,8 @@ h1{margin:0;text-wrap:balance;font-weight:800;letter-spacing:-.02em;}
 .cue.is-fault{color:var(--fault);}
 .cue.is-good .badge{background:rgba(53,208,160,.14);color:var(--good);}
 .cue.is-good{color:var(--good);}
+.cue.is-warn .badge{background:rgba(240,168,40,.16);color:var(--amber);}
+.cue.is-warn{color:var(--amber);}
 
 .framing-hint{
   position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
@@ -305,6 +314,8 @@ h1{margin:0;text-wrap:balance;font-weight:800;letter-spacing:-.02em;}
 .btn-row .primary-btn{flex:1;}
 .sec-btn{padding:16px 18px;border:1px solid var(--hair);border-radius:var(--r-md);font-family:var(--mono);font-size:11px;letter-spacing:.11em;text-transform:uppercase;color:var(--muted);transition:border-color .15s,color .15s;}
 .sec-btn:hover{border-color:var(--faint);color:var(--ink);}
+.buildline{font-family:var(--mono);font-size:9.5px;letter-spacing:.11em;text-transform:uppercase;
+  color:var(--faint);text-align:center;margin-top:10px;}
 
 .hist-item{display:flex;align-items:center;gap:13px;background:var(--surface);border:1px solid var(--hair-soft);border-radius:var(--r-md);padding:13px 14px;}
 .hist-item .sc{font-family:var(--mono);font-size:19px;font-weight:600;font-variant-numeric:tabular-nums;width:38px;flex:none;}
@@ -418,6 +429,8 @@ h1{margin:0;text-wrap:balance;font-weight:800;letter-spacing:-.02em;}
             Everything runs on your phone. No video leaves the device and nothing is uploaded — the pose model is built into this page.
           </p>
           <button class="sec-btn" id="btn-install" hidden>Install on this phone</button>
+          <button class="sec-btn" id="btn-update" style="width:100%;margin-top:8px">Check for update</button>
+          <div class="buildline" id="buildline">Build Sep 12, 15:34</div>
         </div>
 
       </div>
@@ -443,13 +456,17 @@ h1{margin:0;text-wrap:balance;font-weight:800;letter-spacing:-.02em;}
       </div>
 
       <div class="hud-bottom">
-        <div class="readout">
+        <div class="readout" id="readout">
           <div>
             <div class="big num" id="rep-count">0</div>
             <div class="biglab" id="rep-label">Reps</div>
           </div>
+          <div id="depth-big" hidden>
+            <div class="big num depth" id="live-depth">—</div>
+            <div class="biglab">Depth</div>
+          </div>
           <div class="side">
-            <div class="mini"><div class="mv num" id="live-rom">—</div><div class="mk" id="live-rom-lab">ROM</div></div>
+            <div class="mini" id="mini-rom"><div class="mv num" id="live-rom">—</div><div class="mk" id="live-rom-lab">ROM</div></div>
             <div class="mini"><div class="mv num" id="live-vel">—</div><div class="mk">Vel</div></div>
             <div class="mini"><div class="mv num" id="live-loss">—</div><div class="mk">Loss</div></div>
           </div>
@@ -1243,7 +1260,7 @@ class Analyser{
               zeroX:0,prevVs:0,pMin:null,pMax:0,depth:null,leanBot:null,leanMid:null,
               minAscV:0,elbTop:null,kneeTop:null,hipTop:null,hipFirst:null,
               aMinX:this.ancX,aMaxX:this.ancX,hipAngBot:null,thighBot:null,
-              barMin:null,barMax:null,hMin:null,hMax:null};
+              barMin:null,barMax:null,hMin:null,hMax:null,depthCalled:false};
   }
 
   /* Threshold crossings tell us a rep happened; they are the wrong place to
@@ -1454,7 +1471,10 @@ class Analyser{
     const stillFor=this.stillSince==null?0:t-this.stillSince;
     if(stillFor>=300) this.settledS=s;
     this.settleView(t);
-    this.trace.push({t:t-this.t0,s,v:this.vel});
+    /* Latched, not instantaneous: the raw reading flickers across the line by
+       a frame or two of noise, and a trace that strobes red and green is worse
+       than no colour at all. This is the same state the voice announces. */
+    this.trace.push({t:t-this.t0,s,v:this.vel,d:(this.cur&&this.cur.depthCalled)?1:0});
     if(this.trace.length>5000) this.trace.shift();
 
     /* ---- calibration: learn the range from the first real movement ----
@@ -1627,7 +1647,26 @@ class Analyser{
        second and a half is not grinding through one. */
     if(this.cur&&!this.reps.length&&t-this.cur.tStart>8000&&stillFor>1500) this.abandon(s);
     else if(this.cur&&t-this.cur.tStart>20000) this.rejectRep(t,"timeout",p);  // racked / walked away
-    return {ok:true,g,s,p,depth:this.key==="squat"?this.depthNow(rawKps):null};
+    const dn=this.key==="squat"?this.depthNow(rawKps):null;
+    /* Told after the rep, "borderline" is a fact about something already over.
+       Told on the way down, the moment the crease passes the knee, it is the
+       one cue that can still change the rep — and its absence says just as
+       much: turning around without having heard it means you were short. */
+    /* Judged on the same number the rep will be scored on — the depth recorded
+       at the deepest frame — not on whatever the live reading happens to be
+       doing. Reading one and scoring the other is how a rep gets told "depth"
+       and then called borderline. */
+    if(this.cur&&this.cur.depth!=null&&!this.cur.depthCalled&&this.mode!=="comp"&&
+       (this.state==="DESC"||this.state==="BOTTOM")){
+      const th=this.thighRef!=null?this.thighRef:0.90;
+      if(this.cur.depth+Calib.depth>=0.047*th){
+        this.cur.depthCalled=true;
+        this.push("Depth.");
+        this.liveCue={sev:"good",label:"Depth",text:"Past parallel — come up when you like",speak:null};
+        this.cueAt=t;
+      }
+    }
+    return {ok:true,g,s,p,depth:dn,deep:!!(this.cur&&this.cur.depthCalled)};
   }
 
   /* Side on, the far leg is occluded and the model is guessing at it. Averaging
@@ -1837,10 +1876,18 @@ class Analyser{
       this.liveCue={sev:"good",label:"Judging",text:"Hold still and wait for the command",speak:null};
     } else {
       const bad=faults.find(f=>f[0]==="fault");
+      /* A rep that came within a couple of centimetres of the line is the one
+         you most want to hear about while you are still under the bar — it is
+         the one you would put another inch into. It is not a fault, so it was
+         falling through to "Clean", which is the wrong thing to say about a
+         rep that might not have been. */
+      const close=!bad&&faults.find(f=>f[1]==="Borderline");
       /* Spoken: the number, plus the fault in one word when there is one. The
          phone is across the room, so anything longer arrives after the next rep. */
       this.liveCue=bad
         ?{sev:"fault",label:bad[1],text:bad[2],speak:`${rep.i}. ${bad[1]}.`}
+        :close
+        ?{sev:"warn",label:"Borderline",text:close[2],speak:`${rep.i}. Borderline.`}
         :{sev:"good",label:"Clean",text:`Rep ${rep.i} — ${rom.toFixed(2)} ROM at ${meanVel.toFixed(2)}/s`,
           speak:String(rep.i)};
     }
@@ -2031,6 +2078,23 @@ const App={
     $("btn-hist-close").onclick=()=>show("s-setup");
     $("btn-review-close").onclick=()=>show("s-setup");
     $("btn-start").onclick=()=>{ this.armTilt(); this.start(); };
+    /* Installed as an app it is cache-first, which is what makes it work in a
+       garage with no signal and also what makes a new upload invisible. This
+       throws the cache away and fetches again. */
+    $("btn-update").onclick=async(e)=>{
+      const b=e.currentTarget; b.textContent="Checking\u2026"; b.disabled=true;
+      try{
+        if("caches" in window) for(const k of await caches.keys()) await caches.delete(k);
+        if(navigator.serviceWorker){
+          for(const r of await navigator.serviceWorker.getRegistrations()){
+            try{ await r.unregister(); }catch(err){}
+          }
+        }
+      }catch(err){}
+      /* A query string the browser has not seen defeats its own HTTP cache too,
+         which the service worker sits in front of but does not replace. */
+      location.replace(location.pathname+"?u="+Date.now());
+    };
     $("btn-stop").onclick=()=>this.stop();
     $("btn-rezero").onclick=()=>{
       this.cropBox=null; this.boxMiss=0;
@@ -2342,6 +2406,13 @@ const App={
 
   updateHUD(res,t){
     const a=this.analyser, pill=$("pill-status"), hint=$("framing-hint");
+    /* Which numbers this lift shows is a property of the lift, not of whether
+       the camera can see anyone this instant — deciding it inside the tracking
+       branch means the panel never appears until tracking starts. */
+    const sq=this.lift==="squat";
+    $("readout").classList.toggle("is-squat",sq);
+    $("depth-big").hidden=!sq;
+    $("mini-rom").hidden=sq;
     /* Spoken status: you are across the room and cannot see the screen. */
     const phase=!res.ok?"nolock":(res.calibrating?"calib":"track");
     if(phase!==this.phase){
@@ -2375,10 +2446,14 @@ const App={
     /* On squats the live depth is the number worth watching — it is what the
        verdict turns on, and seeing it removes the guesswork. */
     const last=a.reps[a.reps.length-1];
-    if(this.lift==="squat"){
-      $("live-rom-lab").textContent="Depth";
+    if(sq){
       const dn=res.depth?res.depth.d+Calib.depth:null;
-      $("live-rom").textContent=dn==null?"—":(dn>=0?"+":"")+dn.toFixed(2);
+      const el=$("live-depth");
+      el.textContent=dn==null?"—":(dn>=0?"+":"")+dn.toFixed(2);
+      /* Turns over the instant the crease passes the knee — which reaches the
+         eye a couple of hundred milliseconds before the spoken word reaches
+         the ear, and is the half of it that carries across a room. */
+      el.className="big num depth "+(res.deep?"past":(dn!=null?"under":""));
     } else if(last){
       $("live-rom-lab").textContent="ROM";
       $("live-rom").textContent=last.rom.toFixed(2);
@@ -2499,12 +2574,28 @@ function drawScope(a){
   const X=i=>i/(pts.length-1)*w, Y=s=>h-3-((s-lo)/(hi-lo))*(h-6);
   g.strokeStyle="rgba(43,53,65,.9)"; g.lineWidth=1;
   g.beginPath(); g.moveTo(0,h/2); g.lineTo(w,h/2); g.stroke();
-  g.strokeStyle="#F0A828"; g.lineWidth=2; g.lineJoin="round";
-  g.beginPath();
-  pts.forEach((p,i)=>{ i?g.lineTo(X(i),Y(p.s)):g.moveTo(X(i),Y(p.s)); });
-  g.stroke();
-  g.beginPath(); g.arc(X(pts.length-1),Y(pts[pts.length-1].s),2.5,0,7);
-  g.fillStyle="#F0A828"; g.fill();
+  /* The curve carries the depth call. Across a room the colour is the only
+     part of this anyone can read, and it doubles as a record of the set: green
+     humps got below parallel, amber ones did not. */
+  const deep=App.lift==="squat";
+  g.lineWidth=2.5; g.lineJoin="round"; g.lineCap="round";
+  let i=0;
+  while(i<pts.length-1){
+    const on=deep&&pts[i].d===1;
+    /* j lands on the last point of this run, and is always at least i+1, so
+       the outer loop advances even where the colour changes on every sample.
+       Segments share their end points, which keeps the curve unbroken. */
+    let j=i+1;
+    while(j<pts.length-1&&(deep&&pts[j].d===1)===on) j++;
+    g.strokeStyle=on?"#35D0A0":"#F0A828";
+    g.beginPath(); g.moveTo(X(i),Y(pts[i].s));
+    for(let k=i+1;k<=j;k++) g.lineTo(X(k),Y(pts[k].s));
+    g.stroke();
+    i=j;
+  }
+  const lastOn=deep&&pts[pts.length-1].d===1;
+  g.beginPath(); g.arc(X(pts.length-1),Y(pts[pts.length-1].s),3,0,7);
+  g.fillStyle=lastOn?"#35D0A0":"#F0A828"; g.fill();
 }
 
 function diagramSVG(kind){
