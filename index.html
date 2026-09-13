@@ -430,7 +430,7 @@ h1{margin:0;text-wrap:balance;font-weight:800;letter-spacing:-.02em;}
           </p>
           <button class="sec-btn" id="btn-install" hidden>Install on this phone</button>
           <button class="sec-btn" id="btn-update" style="width:100%;margin-top:8px">Check for update</button>
-          <div class="buildline" id="buildline">Build Sep 12, 15:34</div>
+          <div class="buildline" id="buildline">Build Sep 13, 13:32</div>
         </div>
 
       </div>
@@ -547,15 +547,35 @@ const MIN_SCORE=0.32;
    population averages, which is why Calib below exists. */
 const CREASE_K=0.09;      // hip crease sits below the hip joint centre
 const KNEETOP_K=0.06;     // top of the knee sits above the knee joint centre
-/* The anatomy above is not the whole gap. A pose model does not annotate a hip
-   where a judge looks: its hip keypoint sits up toward the middle of the pelvis
-   rather than at the crease, which makes every squat read shallower than it
-   was. Measured against a set of squats their lifter said would all have passed
-   on a platform, the shortfall was 0.17 femur lengths — about 7cm, far more
-   than crease-and-patella geometry can account for. It is a property of the
-   model rather than of the lifter, so it is corrected here for everyone, and
-   the per-lifter calibration in the report is still there for what is left. */
-const MODEL_HIP_BIAS=0.17;
+/* The anatomy above is not the whole gap: a pose model does not annotate a hip
+   exactly where a judge looks. This constant carries whatever is left over.
+
+   It was +0.17 for a while, on the theory that the model places its hip up
+   toward the middle of the pelvis and so reads every squat shallow. That was
+   wrong twice over. It had been fitted while depth was sampled late — from the
+   frame the state machine decided the descent had stopped, which on five real
+   reps arrived 250-417ms after the true bottom and read 0.104 torso lengths
+   shallow — so it was mostly standing in for a timing bug, now fixed in
+   trackDepth. And the theory behind its sign does not survive measurement.
+
+   The test needs no camera model and no ground truth. Standing upright the
+   body is vertical, every joint is much the same distance from the lens, and
+   the hip-to-knee drop should equal the knee-to-ankle drop, because femur and
+   tibia span near enough the same height (hip 0.530 of stature, knee 0.285,
+   ankle 0.039 — Winter). On 98 upright frames, knee straight past 168 degrees
+   and torso within 12 degrees of vertical, the thigh drop came out SHORTER
+   than the shank drop: 88.8px against 94.8px cropped, 88.9 against 97.4 on an
+   independent letterboxed extraction of the same clip. The hip-knee pair
+   already reads 0.07-0.10 femur deeper than anatomy before any correction —
+   the opposite of the assumption — so +0.17 on top was over-reading by about
+   a quarter of a femur, near enough 10cm.
+
+   Set so the total correction lands where the lifter put his own crease on a
+   zoomed frame of the bottom of a rep, with the model's keypoints and four
+   candidate levels drawn on it. His pick agreed with the anatomy measurement.
+   Population ratios vary a few percent between people, which is exactly what
+   the per-lifter calibration in the report is for. */
+const MODEL_HIP_BIAS=-0.08;
 const HIP_CREASE_K=CREASE_K+KNEETOP_K+MODEL_HIP_BIAS;
 
 /* One lifter's own anatomy beats a population average. This lets a rep the
@@ -1260,7 +1280,44 @@ class Analyser{
               zeroX:0,prevVs:0,pMin:null,pMax:0,depth:null,leanBot:null,leanMid:null,
               minAscV:0,elbTop:null,kneeTop:null,hipTop:null,hipFirst:null,
               aMinX:this.ancX,aMaxX:this.ancX,hipAngBot:null,thighBot:null,
-              barMin:null,barMax:null,hMin:null,hMax:null,depthCalled:false};
+              barMin:null,barMax:null,hMin:null,hMax:null,depthCalled:false,
+              depthT:null};
+    this.dH=[];                                  // last few live depth readings
+  }
+
+  /* Depth is the one measurement that was being read at the wrong moment.
+     It used to be sampled once, at the frame the state machine decided the
+     descent had stopped — a decision that runs on a filtered velocity and so
+     lands a frame or two late, by which time the drive out of the hole has
+     already carried the crease back above the knee. On five real reps that
+     cost between 250 and 417 milliseconds, and the reading was shallow by
+     0.104 torso lengths on average — a quarter of a thigh, and varying by
+     enough between reps to move a verdict on its own.
+
+     So read it every frame and keep the deepest. A median of the last three
+     readings keeps a single mislocated hip from claiming a depth that never
+     happened; the arc through the bottom is smooth enough that the median
+     costs about 0.01 and buys immunity to spikes. */
+  trackDepth(dn,s){
+    const c=this.cur;
+    if(!c) return;
+    /* Standing back up with the rep still open means whatever was measured
+       before was a false start — ducking under the bar on the walkout, a
+       stance shifted and reset — and has no bearing on the rep about to
+       happen. Throw it away rather than let it stand as the rep's depth. */
+    if(isFinite(s)&&c.sStart-s<0.25*this.rom()&&c.depth!=null){
+      c.depth=null; c.depthConf=null; c.depthT=null; this.dH.length=0;
+    }
+    if(dn==null||dn.conf<0.50) return;
+    this.dH.push(dn.d); if(this.dH.length>3) this.dH.shift();
+    const w=[...this.dH].sort((a,b)=>a-b), m=w[Math.floor(w.length/2)];
+    if(this.dH.length<2) return;                 // one frame is not yet evidence
+    if(c.depth==null||m>c.depth){
+      c.depth=m; c.depthConf=dn.conf; c.depthT=this.prev?this.prev.t:null;
+      /* The still shown in the review is the evidence behind the number, so
+         it has to be the frame the number came from. */
+      if(this.key==="squat") this.pendingStill=true;
+    }
   }
 
   /* Threshold crossings tell us a rep happened; they are the wrong place to
@@ -1606,8 +1663,17 @@ class Analyser{
             this.finishRep(t); break;
           }
           /* Only a genuine bail from here: a rep that got most of the way home
-             has finished, whatever the reference says. */
-          if(this.cur.riseMax<0.75*drop&&this.cur.pMax>0.45&&p<0.30){
+             has finished, whatever the reference says.
+
+             Asked entirely in the rep's own terms — how far he rose, and how
+             much of that he has given back — rather than against the
+             calibrated band. The band is a different scale from this rep's
+             excursion, and mixing the two made the test depend on how a
+             lifter's proportions happened to sit against the reference range:
+             the same sink was caught on one synthetic body and missed on
+             another, both of them within the range real footage shows. */
+          const gave=this.cur.riseMax-rise;
+          if(this.cur.riseMax<0.75*drop&&this.cur.riseMax>=0.30*drop&&gave>=0.25*drop){
             if(real) this.rejectRep(t,"sank",p); else this.abandon(s);
             break;
           }
@@ -1648,16 +1714,28 @@ class Analyser{
     if(this.cur&&!this.reps.length&&t-this.cur.tStart>8000&&stillFor>1500) this.abandon(s);
     else if(this.cur&&t-this.cur.tStart>20000) this.rejectRep(t,"timeout",p);  // racked / walked away
     const dn=this.key==="squat"?this.depthNow(rawKps):null;
+    if(this.cur&&(this.state==="DESC"||this.state==="BOTTOM")) this.trackDepth(dn,s);
     /* Told after the rep, "borderline" is a fact about something already over.
        Told on the way down, the moment the crease passes the knee, it is the
        one cue that can still change the rep — and its absence says just as
-       much: turning around without having heard it means you were short. */
-    /* Judged on the same number the rep will be scored on — the depth recorded
-       at the deepest frame — not on whatever the live reading happens to be
-       doing. Reading one and scoring the other is how a rep gets told "depth"
-       and then called borderline. */
+       much: turning around without having heard it means you were short.
+
+       Judged on the same number the rep will be scored on, which is now the
+       deepest reading of the rep so far rather than a single late sample. The
+       call and the verdict cannot disagree because they are the same number,
+       so the two cannot disagree.
+
+       Speaking it needs one more condition than recording it does. Ducking
+       under the bar on the walkout puts the crease past the knee for a few
+       frames, and shouting "depth" at a man still walking the weight out is
+       worse than useless. That dip travels about 0.12 of the tracked signal
+       where a real rep is past 0.25 by the time the crease crosses, so say
+       nothing until he has genuinely descended. Recording is left alone by
+       this: a squat cut high needs its depth measured precisely so it can be
+       called high. */
     if(this.cur&&this.cur.depth!=null&&!this.cur.depthCalled&&this.mode!=="comp"&&
-       (this.state==="DESC"||this.state==="BOTTOM")){
+       (this.state==="DESC"||this.state==="BOTTOM")&&
+       (this.cur.sStart-s)>=0.40*this.rom()){
       const th=this.thighRef!=null?this.thighRef:0.90;
       if(this.cur.depth+Calib.depth>=0.047*th){
         this.cur.depthCalled=true;
@@ -1682,7 +1760,6 @@ class Analyser{
     const hip=useL?kps[KP.lHip]:kps[KP.rHip], kne=useL?kps[KP.lKne]:kps[KP.rKne];
     /* Drawn on the video frame, so the guide lines stay in its coordinates. */
     const rHip=useL?rawKps[KP.lHip]:rawKps[KP.rHip], rKne=useL?rawKps[KP.lKne]:rawKps[KP.rKne];
-    const rThigh=dist(rHip,rKne);
     /* Shift the joint centres to the crease and the top of the knee before
        comparing: +ve means hip crease below the top of the knee. */
     /* The crease sits below the hip joint and the top of the knee above its
@@ -1691,22 +1768,32 @@ class Analyser{
        it points at the lens and all but disappears, taking the correction with
        it and calling every legal rep high. Use the length learned standing. */
     const thigh=this.thighRef!=null?this.thighRef*this.torso:dist(hip,kne);
+    /* The two lines drawn on the still are the app showing its working, so
+       they have to be the levels it actually compared — the same constant and
+       the same femur as the number, or the picture quietly disagrees with the
+       verdict it is supposed to justify. They used to carry the anatomical
+       offsets only, leaving the model's own hip bias out of the picture and
+       the lines a fifth of a femur away from where the judging happened. */
     return {d:(hip.y-kne.y+HIP_CREASE_K*thigh)/this.torso,
             conf:Math.max(L,R), side:useL?"L":"R", thigh,
             hip:rHip, kne:rKne,
-            creaseY:rHip.y+CREASE_K*rThigh, kneeTopY:rKne.y-KNEETOP_K*rThigh};
+            creaseY:rHip.y+(CREASE_K+MODEL_HIP_BIAS)*thigh, kneeTopY:rKne.y-KNEETOP_K*thigh};
   }
 
+  /* The lowest point of the tracked signal, which is still the right place to
+     read torso angle and thigh angle from. Depth is no longer taken here —
+     see trackDepth — because this frame arrives after the turnaround. */
   captureBottom(g,kps){
     if(!this.cur) return;
-    this.pendingStill=true;      // this frame is the deepest seen so far in the rep
+    /* On a squat the still is captured at the deepest depth reading instead.
+       If none was ever confident enough, fall back to this frame so the review
+       still has a picture to show. */
+    if(this.key!=="squat"||this.cur.depth==null) this.pendingStill=true;
     if(g.shoOK&&g.hipOK) this.cur.leanBot=torsoLean(g.sho,g.hip);
     if(g.shoOK&&g.hipOK&&g.kneOK&&isFinite(this.torso)&&this.torso>0){
       this.cur.hipAngBot=angleAt(g.sho,g.hip,g.kne);
       this.cur.thighBot=dist(g.hip,g.kne)/this.torso;
     }
-    const dn=kps?this.depthNow(kps):null;
-    if(dn){ this.cur.depth=dn.d; this.cur.depthConf=dn.conf; }
   }
 
   /* Standing where you are about to lift and asking it to start again is the
@@ -1766,10 +1853,13 @@ class Analyser{
       return this.note("feet moved across the frame",c,drop);
     /* Until the set has a range of its own, the thing that separates a squat
        from ducking under the bar is simply how far down the hips got. Standing
-       reads about −0.75; even a high squat that would be turned down on a
-       platform reads better than −0.3. Nothing legal sits below this. */
+       reads about −1.0 femur; even a high squat that would be turned down on a
+       platform reads better than −0.55. Nothing legal sits below this. Scaled
+       with MODEL_HIP_BIAS when that constant was corrected: the whole depth
+       axis shifted by a quarter of a femur, and a gate left behind would have
+       started throwing out shallow-but-real reps. */
     if(this.key==="squat"&&!this.reps.length&&c.depth!=null&&
-       c.depth+Calib.depth<-0.33*(this.thighRef!=null?this.thighRef:0.90))
+       c.depth+Calib.depth<-0.58*(this.thighRef!=null?this.thighRef:0.90))
       return this.note("hips stayed too high",c,drop);
     return true;
   }
@@ -2538,8 +2628,9 @@ function paintStill(video,kps,a){
   if(a.key==="squat"){
     const dn=a.depthNow(kps);
     if(dn){
-      const pass=(dn.d+Calib.depth)>=-0.03;
-      const col=pass?"#35D0A0":"#E5484D";
+      /* Coloured by the rule the verdict uses, not a threshold of its own. */
+      const th=a.thighRef!=null?a.thighRef:0.90, v=dn.d+Calib.depth;
+      const col=v>=0.047*th?"#35D0A0":(v>=-0.047*th?"#F0A828":"#E5484D");
       g.setLineDash([5,4]); g.lineWidth=1.5;
       [[dn.creaseY,"HIP CREASE"],[dn.kneeTopY,"KNEE TOP"]].forEach(([y,lab])=>{
         g.strokeStyle=col; g.beginPath();
