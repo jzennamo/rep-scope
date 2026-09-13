@@ -430,7 +430,7 @@ h1{margin:0;text-wrap:balance;font-weight:800;letter-spacing:-.02em;}
           </p>
           <button class="sec-btn" id="btn-install" hidden>Install on this phone</button>
           <button class="sec-btn" id="btn-update" style="width:100%;margin-top:8px">Check for update</button>
-          <div class="buildline" id="buildline">Build Sep 13, 13:32</div>
+          <div class="buildline" id="buildline">Build Sep 13, 18:02</div>
         </div>
 
       </div>
@@ -547,35 +547,35 @@ const MIN_SCORE=0.32;
    population averages, which is why Calib below exists. */
 const CREASE_K=0.09;      // hip crease sits below the hip joint centre
 const KNEETOP_K=0.06;     // top of the knee sits above the knee joint centre
-/* The anatomy above is not the whole gap: a pose model does not annotate a hip
-   exactly where a judge looks. This constant carries whatever is left over.
+/* Is anything left over beyond the anatomy above? A pose model need not put a
+   hip exactly where a judge looks, so this term carried the difference.
 
-   It was +0.17 for a while, on the theory that the model places its hip up
-   toward the middle of the pelvis and so reads every squat shallow. That was
-   wrong twice over. It had been fitted while depth was sampled late — from the
-   frame the state machine decided the descent had stopped, which on five real
-   reps arrived 250-417ms after the true bottom and read 0.104 torso lengths
-   shallow — so it was mostly standing in for a timing bug, now fixed in
-   trackDepth. And the theory behind its sign does not survive measurement.
+   It was +0.17 for a while, fitted against a set the lifter said would all have
+   passed — but fitted while depth was being sampled late (see trackDepth), so
+   it was mostly standing in for a timing bug. Corrected to -0.08 on an
+   anthropometric argument: standing, the hip-to-knee drop should equal the
+   knee-to-ankle drop, and it measured short. That argument turned out to rest
+   on the ANKLE keypoint being correctly placed, which was never checked.
 
-   The test needs no camera model and no ground truth. Standing upright the
-   body is vertical, every joint is much the same distance from the lens, and
-   the hip-to-knee drop should equal the knee-to-ankle drop, because femur and
-   tibia span near enough the same height (hip 0.530 of stature, knee 0.285,
-   ankle 0.039 — Winter). On 98 upright frames, knee straight past 168 degrees
-   and torso within 12 degrees of vertical, the thigh drop came out SHORTER
-   than the shank drop: 88.8px against 94.8px cropped, 88.9 against 97.4 on an
-   independent letterboxed extraction of the same clip. The hip-knee pair
-   already reads 0.07-0.10 femur deeper than anatomy before any correction —
-   the opposite of the assumption — so +0.17 on top was over-reading by about
-   a quarter of a femur, near enough 10cm.
+   Settled properly with two cameras on the same set. Seven bottoms, filmed
+   head on and side on at once; the clips align at a fixed 9.2s offset and the
+   two views agree independently on the depth ordering of every rep. Side on
+   the lifter judged each one as he would on a platform. That verdict brackets
+   this constant from both sides for the first time — the shallowest rep he
+   passed sets a floor, the deepest he failed sets a ceiling:
 
-   Set so the total correction lands where the lifter put his own crease on a
-   zoomed frame of the bottom of a rep, with the model's keypoints and four
-   candidate levels drawn on it. His pick agreed with the anatomy measurement.
-   Population ratios vary a few percent between people, which is exactly what
-   the per-lifter calibration in the report is for. */
-const MODEL_HIP_BIAS=-0.08;
+       HIP_CREASE_K must be >= 0.089 and < 0.202     ->     midpoint 0.146
+
+   CREASE_K + KNEETOP_K is 0.150, sitting inside that window and a hair above
+   its midpoint. So there is nothing left over: the anatomy alone is the whole
+   correction, and the model's hip and knee keypoints are, for this comparison,
+   unbiased. The term stays at zero rather than being deleted, because it is
+   the thing that would have to move if a different pose model were swapped in.
+
+   All six of the lifter's verdicts are reproduced exactly at this value, with
+   the two deliberately-high reps refused. The per-lifter calibration in the
+   report remains for individual variation. */
+const MODEL_HIP_BIAS=0.00;
 const HIP_CREASE_K=CREASE_K+KNEETOP_K+MODEL_HIP_BIAS;
 
 /* One lifter's own anatomy beats a population average. This lets a rep the
@@ -1081,6 +1081,12 @@ class Analyser{
   }
   /* The bootstrap range depends on which ruler was available. */
   rom(){ return this.unitLocked?this.cfg.rom0:(this.cfg.rom0Alt||this.cfg.rom0); }
+  /* Reps that actually counted. Everything the state machine asks — whether a
+     range has been established, whether this is still the first attempt — is
+     answered by reps.length, because a no lift still tells it how far this
+     lifter travels. Only the number said out loud and shown on the display
+     uses this one. */
+  legalReps(){ let n=0; for(const r of this.reps) if(!r.noRep) n++; return n; }
   /* Speeds are in units per second, so every velocity threshold moves with the
      unit. These were all set against torso lengths; this keeps them meaning the
      same fraction of a rep however the set is being measured. */
@@ -1739,8 +1745,8 @@ class Analyser{
       const th=this.thighRef!=null?this.thighRef:0.90;
       if(this.cur.depth+Calib.depth>=0.047*th){
         this.cur.depthCalled=true;
-        this.push("Depth.");
-        this.liveCue={sev:"good",label:"Depth",text:"Past parallel — come up when you like",speak:null};
+        this.push("Good.");
+        this.liveCue={sev:"good",label:"Good",text:"Past parallel — come up when you like",speak:null};
         this.cueAt=t;
       }
     }
@@ -1853,13 +1859,13 @@ class Analyser{
       return this.note("feet moved across the frame",c,drop);
     /* Until the set has a range of its own, the thing that separates a squat
        from ducking under the bar is simply how far down the hips got. Standing
-       reads about −1.0 femur; even a high squat that would be turned down on a
-       platform reads better than −0.55. Nothing legal sits below this. Scaled
+       reads about −0.92 femur; even a high squat that would be turned down on a
+       platform reads better than −0.47. Nothing legal sits below this. Scaled
        with MODEL_HIP_BIAS when that constant was corrected: the whole depth
        axis shifted by a quarter of a femur, and a gate left behind would have
        started throwing out shallow-but-real reps. */
     if(this.key==="squat"&&!this.reps.length&&c.depth!=null&&
-       c.depth+Calib.depth<-0.58*(this.thighRef!=null?this.thighRef:0.90))
+       c.depth+Calib.depth<-0.50*(this.thighRef!=null?this.thighRef:0.90))
       return this.note("hips stayed too high",c,drop);
     return true;
   }
@@ -1946,7 +1952,16 @@ class Analyser{
         faults.push(["fault","Grind","The bar stalled and restarted mid-pull"]);
     }
 
-    const rep={i:this.reps.length+1,eccMs,pauseMs,conMs,rom,meanVel,peakVel:c.maxV,
+    /* Above parallel is a no lift, and calling it anything else while still
+       counting it would be saying two things at once. So it takes no number
+       and does not advance the count — but it stays in the list, because the
+       lifter still did the work and the tempo, range and still are worth
+       keeping. Competition mode is left alone: it has its own vocabulary and
+       numbers attempts rather than reps. */
+    const highFault=faults.find(f=>f[0]==="fault"&&f[1]==="High");
+    const noRep=!!highFault&&this.mode!=="comp";
+    const rep={i:noRep?null:this.legalReps()+1,noRep,
+               eccMs,pauseMs,conMs,rom,meanVel,peakVel:c.maxV,
                faults,tEnd:t-this.t0,tStart:c.tStartRel,
                depth:c.depth==null?null:+(c.depth).toFixed(4),
                depthConf:c.depthConf==null?null:+(c.depthConf).toFixed(2)};
@@ -1970,14 +1985,19 @@ class Analyser{
          you most want to hear about while you are still under the bar — it is
          the one you would put another inch into. It is not a fault, so it was
          falling through to "Clean", which is the wrong thing to say about a
-         rep that might not have been. */
+         rep that might not have been. Said as the instruction it really is,
+         because "borderline" tells you what happened and "lower next time"
+         tells you what to do about it. */
       const close=!bad&&faults.find(f=>f[1]==="Borderline");
       /* Spoken: the number, plus the fault in one word when there is one. The
-         phone is across the room, so anything longer arrives after the next rep. */
-      this.liveCue=bad
+         phone is across the room, so anything longer arrives after the next
+         rep. A no lift gets no number — the count has not moved. */
+      this.liveCue=noRep
+        ?{sev:"fault",label:"No rep",text:highFault[2],speak:"No rep."}
+        :bad
         ?{sev:"fault",label:bad[1],text:bad[2],speak:`${rep.i}. ${bad[1]}.`}
         :close
-        ?{sev:"warn",label:"Borderline",text:close[2],speak:`${rep.i}. Borderline.`}
+        ?{sev:"warn",label:"Lower next time",text:close[2],speak:`${rep.i}. Lower next time.`}
         :{sev:"good",label:"Clean",text:`Rep ${rep.i} — ${rom.toFixed(2)} ROM at ${meanVel.toFixed(2)}/s`,
           speak:String(rep.i)};
     }
@@ -2530,8 +2550,9 @@ const App={
       $("rep-count").textContent=String(V.filter(x=>x.good).length);
       $("rep-label").textContent=V.length?`Good of ${V.length}`:"Good lifts";
     } else {
-      $("rep-count").textContent=String(a.reps.length);
-      $("rep-label").textContent="Reps";
+      const legal=a.legalReps(), nr=a.reps.length-legal;
+      $("rep-count").textContent=String(legal);
+      $("rep-label").textContent=nr?`Reps · ${nr} no rep`:"Reps";
     }
     /* On squats the live depth is the number worth watching — it is what the
        verdict turns on, and seeing it removes the guesswork. */
@@ -2816,7 +2837,8 @@ function renderReview(rec){
   $("rv-title").textContent=(s.comp?"Comp · ":"")+c.name;
   $("rv-sub").textContent=(s.comp&&s.verdicts.length
       ? `${s.goodLifts}/${s.verdicts.length} good · `
-      : `${s.reps.length} rep${s.reps.length===1?"":"s"} · `)
+      : (()=>{const L=s.reps.filter(r=>!r.noRep).length, N=s.reps.length-L;
+               return `${L} rep${L===1?"":"s"}${N?` · ${N} no rep`:""} · `;})())
     +(s.nRejects?`${s.nRejects} not counted · `:"")
     +new Date(rec.ts).toLocaleDateString(undefined,{month:"short",day:"numeric"});
 
@@ -2882,7 +2904,7 @@ function renderReview(rec){
     markers=s.reps.map(r=>{
       const x=X(r.tEnd).toFixed(1);
       return `<line x1="${x}" y1="${PY}" x2="${x}" y2="${H-PY}" stroke="#3D4A5A" stroke-width="1" stroke-dasharray="2 3"/>
-              <text x="${x}" y="${PY-1}" text-anchor="middle" fill="#7A8696" font-family="IBM Plex Mono,monospace" font-size="9">${r.i}</text>`;
+              <text x="${x}" y="${PY-1}" text-anchor="middle" fill="#7A8696" font-family="IBM Plex Mono,monospace" font-size="9">${r.i==null?"NR":r.i}</text>`;
     }).join("");
   }
 
@@ -2924,7 +2946,7 @@ function renderReview(rec){
         <div class="s">Tap a rep to jump straight to it — the table rows seek too.</div>
       </div>
       <div class="chips">${(s.reps||[]).map(r=>
-        `<button class="chip" data-seek="${((r.tStart!=null?r.tStart:r.tEnd)/1000).toFixed(2)}">${r.i}</button>`).join("")}
+        `<button class="chip" data-seek="${((r.tStart!=null?r.tStart:r.tEnd)/1000).toFixed(2)}">${r.i==null?"NR":r.i}</button>`).join("")}
       </div>
     </div>`:""}
 
@@ -2939,9 +2961,10 @@ function renderReview(rec){
       <div class="stills">${stills.map(r=>{
         const d=r.depth==null?null:r.depth+Calib.depth;
         const cls=d==null?"":(d<-0.03?"is-low":"is-ok");
-        const cap=d==null?`Rep ${r.i}`:`Rep ${r.i} · ${(Math.abs(d)).toFixed(2)} ${d>=0?"below":"above"}`;
+        const nm=r.i==null?"No rep":`Rep ${r.i}`;
+        const cap=d==null?nm:`${nm} · ${(Math.abs(d)).toFixed(2)} ${d>=0?"below":"above"}`;
         return `<figure class="${cls}" data-seek="${((r.tStart!=null?r.tStart:r.tEnd)/1000).toFixed(2)}">
-          <img src="${r.still}" alt="Bottom of rep ${r.i}" loading="lazy">
+          <img src="${r.still}" alt="Bottom of ${r.i==null?"a no rep":"rep "+r.i}" loading="lazy">
           <figcaption>${cap}</figcaption></figure>`;
       }).join("")}</div>
     </div>`:""}
