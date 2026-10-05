@@ -1,10 +1,10 @@
 /* Rep Scope service worker — same-origin cache-first, so the app works offline. */
-const CACHE = "repscope-72bf751ef0";
+const CACHE = "repscope-7fe39bfb20";
 const ASSETS = ["./", "./index.html", "./manifest.webmanifest",
                 "./icon-180.png", "./icon-192.png", "./icon-512.png", "./icon-maskable-512.png"];
 
 self.addEventListener("install", e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS.map(u => new Request(u, { cache: "reload" })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener("activate", e => {
@@ -18,6 +18,8 @@ self.addEventListener("fetch", e => {
   // Leave cross-origin alone (the web font). If it fails offline the page just
   // uses its fallback stack, which is a better outcome than a broken response.
   if (e.request.method !== "GET" || url.origin !== location.origin) return;
+  // update checks read the live sw.js; never answer them from the cache
+  if (url.pathname.endsWith("/sw.js")) return;
   e.respondWith(
     caches.match(e.request, { ignoreSearch: true })
       .then(hit => hit || fetch(e.request).then(res => {

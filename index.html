@@ -313,6 +313,8 @@ h1{margin:0;text-wrap:balance;font-weight:800;letter-spacing:-.02em;}
 .btn-row{display:flex;gap:8px;}
 .btn-row .primary-btn{flex:1;}
 .sec-btn{padding:16px 18px;border:1px solid var(--hair);border-radius:var(--r-md);font-family:var(--mono);font-size:11px;letter-spacing:.11em;text-transform:uppercase;color:var(--muted);transition:border-color .15s,color .15s;}
+.upd-banner{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 16px 4px;padding:12px 14px;border:1px solid var(--good);border-radius:var(--r-md);background:var(--surface);font-size:13px;color:var(--ink);}
+.upd-banner .ghost-btn{border-color:var(--good);color:var(--good);}
 .sec-btn:hover{border-color:var(--faint);color:var(--ink);}
 .buildline{font-family:var(--mono);font-size:9.5px;letter-spacing:.11em;text-transform:uppercase;
   color:var(--faint);text-align:center;margin-top:10px;}
@@ -363,6 +365,7 @@ h1{margin:0;text-wrap:balance;font-weight:800;letter-spacing:-.02em;}
       <div class="spacer"></div>
       <button class="ghost-btn" id="btn-history">History</button>
     </header>
+    <div class="upd-banner" id="updBanner" role="status" hidden><span>A new version of Rep Scope is ready.</span><button class="ghost-btn" id="updBannerBtn">Update</button></div>
     <div class="scroller">
       <div class="pad stack">
 
@@ -429,8 +432,9 @@ h1{margin:0;text-wrap:balance;font-weight:800;letter-spacing:-.02em;}
             Everything runs on your phone. No video leaves the device and nothing is uploaded — the pose model is built into this page.
           </p>
           <button class="sec-btn" id="btn-install" hidden>Install on this phone</button>
-          <button class="sec-btn" id="btn-update" style="width:100%;margin-top:8px">Check for update</button>
-          <div class="buildline" id="buildline">Build Sep 13, 18:09</div>
+          <button class="sec-btn" id="updBtn" style="width:100%;margin-top:8px">Check for updates</button>
+          <p class="note" id="updStatus" role="status" style="margin-top:8px"></p>
+          <div class="buildline" id="buildline">Build Oct 5</div>
         </div>
 
       </div>
@@ -2192,23 +2196,6 @@ const App={
     $("btn-hist-close").onclick=()=>show("s-setup");
     $("btn-review-close").onclick=()=>show("s-setup");
     $("btn-start").onclick=()=>{ this.armTilt(); this.start(); };
-    /* Installed as an app it is cache-first, which is what makes it work in a
-       garage with no signal and also what makes a new upload invisible. This
-       throws the cache away and fetches again. */
-    $("btn-update").onclick=async(e)=>{
-      const b=e.currentTarget; b.textContent="Checking\u2026"; b.disabled=true;
-      try{
-        if("caches" in window) for(const k of await caches.keys()) await caches.delete(k);
-        if(navigator.serviceWorker){
-          for(const r of await navigator.serviceWorker.getRegistrations()){
-            try{ await r.unregister(); }catch(err){}
-          }
-        }
-      }catch(err){}
-      /* A query string the browser has not seen defeats its own HTTP cache too,
-         which the service worker sits in front of but does not replace. */
-      location.replace(location.pathname+"?u="+Date.now());
-    };
     $("btn-stop").onclick=()=>this.stop();
     $("btn-rezero").onclick=()=>{
       this.cropBox=null; this.boxMiss=0;
@@ -3228,6 +3215,80 @@ function show(id){
 App.init();
 </script>
 
+
+<script>
+/* ---------- app updates ----------
+   APP_VERSION must match the version string in sw.js. Bump both on every release:
+   the Updates section compares this page's version with the live sw.js. Updating
+   clears the offline cache and reloads; saved data (localStorage, IndexedDB) is
+   not touched. */
+const APP_VERSION = 'repscope-7fe39bfb20';
+const AppUpdate = (() => {
+  const el = id => document.getElementById(id);
+  let latest = null, lastCheck = 0;
+  // the version on the server, or null when it can't be reached
+  async function fetchLatest() {
+    try {
+      const r = await fetch('./sw.js?check=' + Date.now(), { cache: 'no-store' });
+      if (!r.ok) return null;
+      const m = (await r.text()).match(/(?:VERSION|CACHE)\s*=\s*["']([^"']+)["']/);
+      return m ? m[1] : null;
+    } catch (e) { return null; }
+  }
+  // an update already applied this session that still isn't showing means the server
+  // is mid-deploy; don't offer it again in a loop
+  const tried = () => { try { return sessionStorage.getItem('updTried') === latest; } catch (e) { return false; } };
+  const newer = () => !!latest && latest !== APP_VERSION;
+  const ready = () => newer() && !tried();
+  function paint(busy, msg) {
+    const st = el('updStatus'), btn = el('updBtn'), ban = el('updBanner');
+    if (st && msg != null) st.textContent = msg;
+    if (btn) {
+      btn.disabled = busy;
+      btn.textContent = busy ? 'Checking…' : ready() ? 'Update now' : newer() ? 'Try again' : 'Check for updates';
+    }
+    if (ban) ban.hidden = !ready();
+  }
+  async function check(quiet) {
+    if (!quiet) paint(true, 'Checking…');
+    lastCheck = Date.now();
+    const v = await fetchLatest();
+    if (v) latest = v;
+    if (ready()) paint(false, 'A new version is ready. Your saved data stays put.');
+    else if (newer()) paint(false, 'The new version is still rolling out. Try again in a few minutes.');
+    else if (quiet) paint(false, null);
+    else paint(false, v ? 'You have the latest version.' : 'Couldn’t reach the server. Check your connection and try again.');
+  }
+  async function apply() {
+    paint(true, 'Updating…');
+    // never throw the offline copy away without a way to fetch the new one
+    const v = await fetchLatest();
+    if (!v) { paint(false, 'You’re offline, so nothing was changed. Try again with signal.'); return; }
+    latest = v;
+    try {
+      if ('caches' in window) for (const k of await caches.keys()) await caches.delete(k);
+      if (navigator.serviceWorker) for (const r of await navigator.serviceWorker.getRegistrations()) { try { await r.unregister(); } catch (e) {} }
+    } catch (e) {}
+    try { sessionStorage.setItem('updTried', latest); } catch (e) {}
+    // a query the browser hasn't seen skips its HTTP cache too
+    location.replace(location.pathname + '?u=' + Date.now());
+  }
+  function init() {
+    const just = /[?&]u=\d/.test(location.search);
+    if (just) history.replaceState(null, '', location.pathname + location.hash);
+    const v = el('updVersion'); if (v) v.textContent = APP_VERSION;
+    if (el('updBtn')) el('updBtn').onclick = () => newer() ? apply() : check(false);
+    if (el('updBannerBtn')) el('updBannerBtn').onclick = apply;
+    paint(false, just ? 'Updated. You’re on the latest version.' : '');
+    check(true);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && Date.now() - lastCheck > 30 * 60e3) check(true);
+    });
+  }
+  return { init };
+})();
+AppUpdate.init();
+</script>
 
 <script>
 /* Cache the app so it opens instantly and keeps working with no signal —
