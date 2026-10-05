@@ -430,7 +430,7 @@ h1{margin:0;text-wrap:balance;font-weight:800;letter-spacing:-.02em;}
           </p>
           <button class="sec-btn" id="btn-install" hidden>Install on this phone</button>
           <button class="sec-btn" id="btn-update" style="width:100%;margin-top:8px">Check for update</button>
-          <div class="buildline" id="buildline">Build Sep 13, 18:02</div>
+          <div class="buildline" id="buildline">Build Sep 13, 18:09</div>
         </div>
 
       </div>
@@ -1993,7 +1993,11 @@ class Analyser{
          phone is across the room, so anything longer arrives after the next
          rep. A no lift gets no number — the count has not moved. */
       this.liveCue=noRep
-        ?{sev:"fault",label:"No rep",text:highFault[2],speak:"No rep."}
+        /* Not "No rep", which every speech synthesiser reads as "no
+           representative". Said the long way it also matches the other
+           not-counted calls, so a rep that failed on depth and one that failed
+           on travel are announced in the same shape. */
+        ?{sev:"fault",label:"Too high",text:highFault[2],speak:"Not counted. Too high."}
         :bad
         ?{sev:"fault",label:bad[1],text:bad[2],speak:`${rep.i}. ${bad[1]}.`}
         :close
@@ -2552,7 +2556,7 @@ const App={
     } else {
       const legal=a.legalReps(), nr=a.reps.length-legal;
       $("rep-count").textContent=String(legal);
-      $("rep-label").textContent=nr?`Reps · ${nr} no rep`:"Reps";
+      $("rep-label").textContent=nr?`Reps · ${nr} not counted`:"Reps";
     }
     /* On squats the live depth is the number worth watching — it is what the
        verdict turns on, and seeing it removes the guesswork. */
@@ -2838,7 +2842,7 @@ function renderReview(rec){
   $("rv-sub").textContent=(s.comp&&s.verdicts.length
       ? `${s.goodLifts}/${s.verdicts.length} good · `
       : (()=>{const L=s.reps.filter(r=>!r.noRep).length, N=s.reps.length-L;
-               return `${L} rep${L===1?"":"s"}${N?` · ${N} no rep`:""} · `;})())
+               return `${L} rep${L===1?"":"s"}${N?` · ${N} not counted`:""} · `;})())
     +(s.nRejects?`${s.nRejects} not counted · `:"")
     +new Date(rec.ts).toLocaleDateString(undefined,{month:"short",day:"numeric"});
 
@@ -2961,10 +2965,10 @@ function renderReview(rec){
       <div class="stills">${stills.map(r=>{
         const d=r.depth==null?null:r.depth+Calib.depth;
         const cls=d==null?"":(d<-0.03?"is-low":"is-ok");
-        const nm=r.i==null?"No rep":`Rep ${r.i}`;
+        const nm=r.i==null?"Not counted":`Rep ${r.i}`;
         const cap=d==null?nm:`${nm} · ${(Math.abs(d)).toFixed(2)} ${d>=0?"below":"above"}`;
         return `<figure class="${cls}" data-seek="${((r.tStart!=null?r.tStart:r.tEnd)/1000).toFixed(2)}">
-          <img src="${r.still}" alt="Bottom of ${r.i==null?"a no rep":"rep "+r.i}" loading="lazy">
+          <img src="${r.still}" alt="Bottom of ${r.i==null?"a rep that was not counted":"rep "+r.i}" loading="lazy">
           <figcaption>${cap}</figcaption></figure>`;
       }).join("")}</div>
     </div>`:""}
